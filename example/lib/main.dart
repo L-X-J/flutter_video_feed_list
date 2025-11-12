@@ -26,7 +26,7 @@ class VideoFeedDemoPage extends StatelessWidget {
   const VideoFeedDemoPage({super.key});
 
   /// 解析多行 `name,cover,video` 数据为 VideoItem 列表
-  List<VideoItem<dynamic>> _parseUserData(String raw) {
+  List<IVideoItem> _parseUserData(String raw) {
     String clean(String s) => s
         .trim()
         .replaceAll('`', '')
@@ -36,7 +36,7 @@ class VideoFeedDemoPage extends StatelessWidget {
         .replaceAll('\u200b', '');
 
     final lines = raw.split('\n').where((l) => l.trim().isNotEmpty).toList();
-    final items = <VideoItem<dynamic>>[];
+    final items = <IVideoItem>[];
     for (final line in lines) {
       final parts = line.split(',');
       if (parts.length >= 3) {
@@ -45,7 +45,7 @@ class VideoFeedDemoPage extends StatelessWidget {
         final video = clean(parts[2]);
         if (cover.isNotEmpty && video.isNotEmpty) {
           items.add(
-              VideoItem<dynamic>(videoUrl: video, coverUrl: cover, id: name));
+              DefaultVideoItem(videoUrl: video, coverUrl: cover, id: name));
         }
       }
     }

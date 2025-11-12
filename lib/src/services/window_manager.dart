@@ -11,12 +11,12 @@ import '../models/video_item.dart';
 /// - [getOrCreateController] 获取或创建控制器的回调
 /// - [enableLogs] 是否输出诊断日志
 Future<void> manageControllerWindow({
-  required List<VideoItem> items,
+  required List<IVideoItem> items,
   required int currentIndex,
   required int maxCacheControllers,
   required Map<String, VideoPlayerController> controllerCache,
   required Future<void> Function(String key) removeController,
-  required Future<VideoPlayerController?> Function(VideoItem item)
+  required Future<VideoPlayerController?> Function(IVideoItem item)
       getOrCreateController,
   bool enableLogs = false,
 }) async {

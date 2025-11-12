@@ -53,7 +53,7 @@ class VideoFeedView extends StatefulWidget {
   });
 
   /// 数据源列表（每个条目包含视频与封面）
-  final List<VideoItem<dynamic>> items;
+  final List<IVideoItem> items;
 
   /// 初始展示的逻辑索引
   final int initialIndex;
@@ -104,8 +104,7 @@ class VideoFeedView extends StatefulWidget {
   final int preloadAroundEco;
 
   /// 业务叠层构建器：为每个条目构建覆盖在视频之上的组件列表
-  final List<Widget> Function(
-          BuildContext context, VideoItem<dynamic> item, int index)?
+  final List<Widget> Function(BuildContext context, IVideoItem item, int index)?
       bizWidgetsBuilder;
 
   final VideoViewType viewType;
@@ -229,7 +228,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   }
 
   /// 获取或创建控制器
-  Future<VideoPlayerController?> _getOrCreateController(VideoItem item) async {
+  Future<VideoPlayerController?> _getOrCreateController(IVideoItem item) async {
     final key = item.key;
     if (_controllerCache.containsKey(key)) {
       _touchController(key);
@@ -258,7 +257,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   }
 
   /// 创建并初始化控制器
-  Future<VideoPlayerController?> _createController(VideoItem item) async {
+  Future<VideoPlayerController?> _createController(IVideoItem item) async {
     final key = item.key;
     try {
       late VideoPlayerController controller;
