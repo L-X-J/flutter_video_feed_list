@@ -84,6 +84,7 @@ class VideoFeedDemoPage extends StatelessWidget {
         removeTop: true,
         removeBottom: true,
         child: VideoFeedView(
+          feedId: 'demo',
           items: items,
           autoplay: true,
           loop: true,

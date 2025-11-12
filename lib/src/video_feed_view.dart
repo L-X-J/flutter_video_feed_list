@@ -14,6 +14,7 @@ import 'services/window_manager.dart';
 import 'utils/logging.dart';
 import 'enums/eviction_policy.dart';
 import 'services/volume_manager.dart';
+import 'services/feed_session_manager.dart';
 
 /// 页面索引变化回调
 ///
@@ -27,6 +28,7 @@ typedef IndexChanged = void Function(int index);
 class VideoFeedView extends StatefulWidget {
   const VideoFeedView({
     required this.items,
+    required this.feedId,
     this.initialIndex = 0,
     this.loop = true,
     this.autoplay = true,
@@ -110,6 +112,8 @@ class VideoFeedView extends StatefulWidget {
 
   final VideoPlayerOptions? videoPlayerOptions;
 
+  final String feedId;
+
   @override
   State<VideoFeedView> createState() => _VideoFeedViewState();
 }
@@ -157,6 +161,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       await _manageControllerWindow(_currentIndex);
       // 初始化并根据 autoplay 决定是否播放，同时触发重建
       await _initAndPlayVideo(_currentIndex);
+      await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
     });
     _volumeSub = VolumeManager.instance.stream.listen((vol) async {
       final controllers =
@@ -212,6 +217,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.autoplay) {
       await _playController(item.key);
     }
+    final c = _controllerCache[item.key];
+    VideoFeedSessionManager.instance.setCurrent(widget.feedId, c);
     if (mounted) setState(() {});
   }
 
@@ -281,6 +288,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       } catch (_) {}
 
       _controllerCache[key] = controller;
+      VideoFeedSessionManager.instance.register(widget.feedId, controller);
       _touchController(key);
       _enforceCacheLimit(maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
       if (widget.enableLogs) {
@@ -304,6 +312,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
           await controller.setVolume(VolumeManager.instance.volume);
         } catch (_) {}
         _controllerCache[key] = controller;
+        VideoFeedSessionManager.instance.register(widget.feedId, controller);
         _touchController(key);
         _enforceCacheLimit(
             maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
@@ -358,6 +367,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       if (controller != null) {
         _controllerCache.remove(key);
         _accessOrder.remove(key);
+        VideoFeedSessionManager.instance.unregister(widget.feedId, controller);
         // 触发一次重建，让 UI 不再持有已移除的控制器，避免传递到子组件后被使用
         if (mounted) {
           setState(() {});
@@ -490,6 +500,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.items.isEmpty || _currentIndex >= widget.items.length) return;
     await _manageControllerWindow(_currentIndex);
     await _initAndPlayVideo(_currentIndex);
+    final currentItem = widget.items[_currentIndex];
+    final c = _controllerCache[currentItem.key];
+    VideoFeedSessionManager.instance.setCurrent(widget.feedId, c);
     widget.onIndexChanged?.call(_currentIndex);
   }
 
