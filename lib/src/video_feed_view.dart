@@ -277,10 +277,17 @@ class _VideoFeedViewState extends State<VideoFeedView>
     WidgetsBinding.instance.removeObserver(this);
     _settleDebounce?.cancel();
     _settleDebounce = null;
+    VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     _disposeAllControllers();
     _volumeSub?.cancel();
     super.dispose();
+  }
+
+  @override
+  void deactivate() {
+    VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
+    super.deactivate();
   }
 
   @override
