@@ -217,7 +217,6 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   late final PreloadPageController _pageController;
   int _currentIndex = 0;
-  bool _isAppActive = true;
   bool _isScrollSettled = true; // true when PageView is idle/settled
   Timer? _settleDebounce;
   int _effectivePreload = 0;
@@ -298,35 +297,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final wasActive = _isAppActive;
-    _isAppActive = state == AppLifecycleState.resumed;
-    if (_isAppActive && !wasActive) {
-      final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
-      if (!isCurrentRoute) {
-        VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
-        return;
-      }
-      VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
-      _cleanupAndReinitializeCurrentVideo();
-    } else if (!_isAppActive && wasActive) {
-      _pauseAllControllers();
-    }
-  }
-
-  Future<void> _cleanupAndReinitializeCurrentVideo() async {
-    if (widget.items.isEmpty || _currentIndex >= widget.items.length) return;
-    await _pauseAllControllers();
-    final key = widget.items[_currentIndex].key;
-    final controller = _controllerCache[key];
-    if (controller != null &&
-        (controller.value.hasError || !controller.value.isInitialized)) {
-      await _removeController(key);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    await _initAndPlayVideo(_currentIndex);
-  }
+  // 应用生命周期相关逻辑交由业务层处理
 
   Future<void> _initAndPlayVideo(int index) async {
     if (widget.items.isEmpty || index >= widget.items.length) return;
