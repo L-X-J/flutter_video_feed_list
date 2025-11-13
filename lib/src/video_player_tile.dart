@@ -185,8 +185,13 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       }
     }
 
-    final showCover =
-        controller == null || !safelyInitialized || controller.value.hasError;
+    bool hasError = true;
+    try {
+      hasError = controller?.value.hasError ?? true;
+    } catch (_) {
+      hasError = true;
+    }
+    final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
     final Size baseSize =
         safelyInitialized ? controller!.value.size : widget.viewportSize;
