@@ -31,8 +31,17 @@ import 'package:extended_image/extended_image.dart';
 /// ```
 class VideoFeedViewController {
   _VideoFeedViewState? _state;
+  bool? _pendingAutoplay;
   void _bind(_VideoFeedViewState s) {
     _state = s;
+    if (_pendingAutoplay != null) {
+      s._autoplayEnabled = _pendingAutoplay!;
+      if (_pendingAutoplay == true) {
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          await setAutoplay(true);
+        });
+      }
+    }
   }
 
   /// 切换到下一页
@@ -102,6 +111,7 @@ class VideoFeedViewController {
 
   Future<void> setAutoplay(bool enabled) async {
     final s = _state;
+    _pendingAutoplay = enabled;
     if (s == null) return;
     s._autoplayEnabled = enabled;
     if (!enabled) return;
