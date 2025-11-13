@@ -99,6 +99,32 @@ class VideoFeedViewController {
     await s._releaseResources();
     _state = null;
   }
+
+  Future<void> setAutoplay(bool enabled) async {
+    final s = _state;
+    if (s == null) return;
+    s._autoplayEnabled = enabled;
+    if (!enabled) return;
+    if (s.widget.items.isEmpty || s._currentIndex >= s.widget.items.length)
+      return;
+    final item = s.widget.items[s._currentIndex];
+    await s._getOrCreateController(item);
+    final c = s._controllerCache[item.key];
+    if (c != null) {
+      bool canPlay = false;
+      try {
+        canPlay =
+            c.value.isInitialized && !c.value.hasError && !c.value.isPlaying;
+      } catch (_) {
+        canPlay = false;
+      }
+      if (canPlay) {
+        await VideoFeedSessionManager.instance
+            .playExclusive(s.widget.feedId, c);
+        if (s.mounted) s.setState(() {});
+      }
+    }
+  }
 }
 
 /// 页面索引变化回调
@@ -234,6 +260,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   StreamSubscription<double>? _volumeSub;
   bool _released = false;
   bool _tearingDown = false;
+  bool _autoplayEnabled = true;
 
   @override
   void initState() {
@@ -255,6 +282,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         widget.ecoMode ? widget.preloadAroundEco : widget.preloadAround;
     _effectiveMaxControllers =
         widget.ecoMode ? widget.maxControllersEco : widget.maxCacheControllers;
+    _autoplayEnabled = widget.autoplay;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _preloadCoversAround(_currentIndex);
       await _manageControllerWindow(_currentIndex);
@@ -326,7 +354,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.items.isEmpty || index >= widget.items.length) return;
     final item = widget.items[index];
     await _getOrCreateController(item);
-    if (widget.autoplay) {
+    if (_autoplayEnabled) {
       await _playController(item.key);
     }
     final c = _controllerCache[item.key];
@@ -614,7 +642,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       }
 
       await _getOrCreateController(currentItem);
-      if (widget.autoplay) await _playController(currentKey);
+      if (_autoplayEnabled) await _playController(currentKey);
       widget.onIndexChanged?.call(_currentIndex);
       logIf(widget.enableLogs,
           'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}');
