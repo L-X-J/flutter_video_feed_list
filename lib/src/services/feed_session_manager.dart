@@ -187,4 +187,27 @@ class VideoFeedSessionManager {
       await fn();
     }
   }
+
+  Future<void> pauseAllExcept(VideoPlayerController keep) async {
+    for (final set in _groups.values) {
+      for (final c in List<VideoPlayerController>.from(set)) {
+        if (identical(c, keep)) continue;
+        try {
+          if (c.value.isInitialized && c.value.isPlaying) {
+            await c.pause();
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> playExclusive(String groupId, VideoPlayerController controller) async {
+    await pauseAllExcept(controller);
+    try {
+      if (controller.value.isInitialized && !controller.value.hasError && !controller.value.isPlaying) {
+        await controller.play();
+      }
+    } catch (_) {}
+    setCurrent(groupId, controller);
+  }
 }

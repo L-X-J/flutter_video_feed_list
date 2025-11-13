@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:extended_image/extended_image.dart';
+import 'services/feed_session_manager.dart';
 
 /// 单条视频播放组件
 ///
@@ -13,6 +14,7 @@ class VideoPlayerTile extends StatefulWidget {
     required this.coverUrl,
     required this.viewportSize,
     this.bizWidgets,
+    this.groupId,
     super.key,
   });
 
@@ -30,6 +32,7 @@ class VideoPlayerTile extends StatefulWidget {
 
   /// 业务叠层组件列表（显示头像/点赞/描述等），覆盖在视频之上
   final List<Widget>? bizWidgets;
+  final String? groupId;
 
   @override
   State<VideoPlayerTile> createState() => _VideoPlayerTileState();
@@ -230,8 +233,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                             (_) => mounted ? setState(() {}) : null))
                         .catchError((Object e) => debugPrint('Error pausing video: $e'));
                   } else {
-                    c
-                        .play()
+                    VideoFeedSessionManager.instance
+                        .playExclusive(widget.groupId ?? '', c)
                         .then((_) => WidgetsBinding.instance.addPostFrameCallback(
                             (_) => mounted ? setState(() {}) : null))
                         .catchError((Object e) => debugPrint('Error playing video: $e'));

@@ -448,7 +448,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         controller.value.isInitialized &&
         !controller.value.isPlaying) {
       try {
-        await controller.play();
+        await VideoFeedSessionManager.instance.playExclusive(widget.feedId, controller);
       } catch (e) {
         debugPrint('Error playing video: $e');
       }
@@ -706,6 +706,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
                   videoId: item.key,
                   coverUrl: item.coverUrl,
                   viewportSize: viewportSize,
+                  groupId: widget.feedId,
                   bizWidgets: widget.bizWidgetsBuilder
                       ?.call(context, item, logicalIndex),
                 ),
