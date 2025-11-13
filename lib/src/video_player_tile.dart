@@ -67,10 +67,12 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
   void _addControllerListener() {
     if (widget.controller != null) {
-      _isBuffering = widget.controller!.value.isBuffering;
-      _isPlaying = widget.controller!.value.isPlaying;
-      _updateLoadingAnimation();
-      widget.controller!.addListener(_onControllerUpdate);
+      try {
+        _isBuffering = widget.controller!.value.isBuffering;
+        _isPlaying = widget.controller!.value.isPlaying;
+        _updateLoadingAnimation();
+        widget.controller!.addListener(_onControllerUpdate);
+      } catch (_) {}
     }
   }
 
@@ -82,7 +84,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     final bool controllerChanged = widget.controller != _oldController;
 
     if (videoIdChanged || controllerChanged) {
-      _oldController?.removeListener(_onControllerUpdate);
+      try {
+        _oldController?.removeListener(_onControllerUpdate);
+      } catch (_) {}
       _oldController = widget.controller;
       _currentVideoId = widget.videoId;
       _playerKey = UniqueKey();
@@ -106,7 +110,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   @override
   void dispose() {
     _loadingController.dispose();
-    _oldController?.removeListener(_onControllerUpdate);
+    try {
+      _oldController?.removeListener(_onControllerUpdate);
+    } catch (_) {}
     _oldController = null;
     _overlayFade.dispose();
     super.dispose();
@@ -247,7 +253,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   child: SizedBox(
                     width: baseSize.width,
                     height: baseSize.height,
-                    child: controller != null
+                    child: (!showCover && controller != null)
                         ? VideoPlayer(controller)
                         : const SizedBox.shrink(),
                   ),
