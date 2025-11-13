@@ -641,7 +641,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
         n is ScrollUpdateNotification ||
         (n is UserScrollNotification && n.direction != ScrollDirection.idle)) {
       if (_isScrollSettled) {
-        setState(() => _isScrollSettled = false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _isScrollSettled = false;
+        });
       }
       _settleDebounce?.cancel();
       if (n is ScrollUpdateNotification) {
