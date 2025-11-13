@@ -92,6 +92,13 @@ class VideoFeedViewController {
   Future<void> resumeAll() async {
     await VideoFeedSessionManager.instance.resumeAll();
   }
+
+  Future<void> releaseThisFeed() async {
+    final s = _state;
+    if (s == null) return;
+    await s._releaseResources();
+    _state = null;
+  }
 }
 
 /// 页面索引变化回调
@@ -225,6 +232,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   Size _viewportSize = const Size(0, 0);
   double _devicePixelRatio = 1.0;
   StreamSubscription<double>? _volumeSub;
+  bool _released = false;
 
   @override
   void initState() {
@@ -287,6 +295,20 @@ class _VideoFeedViewState extends State<VideoFeedView>
   void deactivate() {
     VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     super.deactivate();
+  }
+
+  Future<void> _releaseResources() async {
+    if (_released) return;
+    _released = true;
+    try {
+      WidgetsBinding.instance.removeObserver(this);
+    } catch (_) {}
+    _settleDebounce?.cancel();
+    _settleDebounce = null;
+    await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
+    VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
+    await _disposeAllControllers();
+    await _volumeSub?.cancel();
   }
 
   @override
