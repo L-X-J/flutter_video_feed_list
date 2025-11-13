@@ -97,9 +97,78 @@ class VideoFeedDemoPage extends StatelessWidget {
           aggressiveOnFastScroll: true,
           viewType: VideoViewType.platformView,
           enableLogs: true,
+          bizWidgetsBuilder: (ctx, item, idx) {
+            return [
+              Positioned(
+                right: 16,
+                bottom: 100,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    CircleAvatar(radius: 24),
+                    SizedBox(height: 16),
+                    _ActionButton(icon: Icons.favorite, label: '1.2w'),
+                    SizedBox(height: 16),
+                    _ActionButton(icon: Icons.comment, label: '356'),
+                    SizedBox(height: 16),
+                    _ActionButton(icon: Icons.share, label: '分享'),
+                  ],
+                ),
+              ),
+              Positioned(
+                left: 16,
+                right: 80,
+                bottom: 32,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      item.id ?? '用户',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '这是一个示例视频描述，仿抖音布局',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            ];
+          },
           onIndexChanged: (i) {},
         ),
       ),
+    );
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.black45,
+            shape: BoxShape.circle,
+          ),
+          padding: const EdgeInsets.all(10),
+          child: Icon(icon, color: Colors.white, size: 28),
+        ),
+        const SizedBox(height: 6),
+        Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
+      ],
     );
   }
 }

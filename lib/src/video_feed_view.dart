@@ -15,6 +15,84 @@ import 'utils/logging.dart';
 import 'enums/eviction_policy.dart';
 import 'services/volume_manager.dart';
 import 'services/feed_session_manager.dart';
+import 'package:extended_image/extended_image.dart';
+
+/// 视频信息流外部控制器
+///
+/// 提供页面切换与索引查询等外部控制能力，需通过
+/// 在 [VideoFeedView] 构造参数中传入 `controller` 完成绑定。
+///
+/// 使用示例：
+/// ```dart
+/// final controller = VideoFeedViewController();
+/// VideoFeedView(feedId: 'A', items: items, controller: controller);
+/// await controller.nextPage();
+/// final i = controller.currentIndex();
+/// ```
+class VideoFeedViewController {
+  _VideoFeedViewState? _state;
+  void _bind(_VideoFeedViewState s) {
+    _state = s;
+  }
+
+  /// 切换到下一页
+  ///
+  /// - 可通过 [duration] 与 [curve] 定制滚动动效
+  /// - 当未绑定或数据为空时调用将被忽略
+  Future<void> nextPage({
+    Duration duration = const Duration(milliseconds: 300),
+    Curve curve = Curves.ease,
+  }) async {
+    final s = _state;
+    if (s == null || s.widget.items.isEmpty) return;
+    try {
+      await s._pageController.nextPage(duration: duration, curve: curve);
+    } catch (_) {}
+  }
+
+  /// 获取当前真实索引（取模后的一致索引）
+  ///
+  /// - 当启用“近似无限滚动”时，内部使用重复页，但该方法返回
+  ///   与 `items` 对应的真实索引范围：`[0, items.length - 1]`
+  /// - 未绑定或数据为空时返回 0
+  int currentIndex() {
+    final s = _state;
+    if (s == null || s.widget.items.isEmpty) return 0;
+    return s._currentIndex;
+  }
+
+  Future<void> pauseThisFeed() async {
+    final s = _state;
+    if (s == null) return;
+    await VideoFeedSessionManager.instance.pauseGroup(s.widget.feedId);
+  }
+
+  Future<void> resumeThisFeed() async {
+    final s = _state;
+    if (s == null) return;
+    await VideoFeedSessionManager.instance.resumeGroup(s.widget.feedId);
+  }
+
+  bool isPlayingThisFeed() {
+    final s = _state;
+    if (s == null) return false;
+    return VideoFeedSessionManager.instance.isPlaying(s.widget.feedId);
+  }
+
+  Future<void> pauseOthers() async {
+    final s = _state;
+    if (s == null) return;
+    await VideoFeedSessionManager.instance.pauseOthers(s.widget.feedId);
+  }
+
+  Future<void> pauseAll() async {
+    await VideoFeedSessionManager.instance.pauseAll();
+  }
+
+  Future<void> resumeAll() async {
+    await VideoFeedSessionManager.instance.resumeAll();
+  }
+}
 
 /// 页面索引变化回调
 ///
@@ -27,8 +105,9 @@ typedef IndexChanged = void Function(int index);
 /// - 提供“滑到即播”的体验与低内存运行策略
 class VideoFeedView extends StatefulWidget {
   const VideoFeedView({
-    required this.items,
     required this.feedId,
+    required this.items,
+    this.controller,
     this.initialIndex = 0,
     this.loop = true,
     this.autoplay = true,
@@ -49,6 +128,8 @@ class VideoFeedView extends StatefulWidget {
     this.bizWidgetsBuilder,
     this.viewType = VideoViewType.textureView,
     this.videoPlayerOptions,
+    this.emptyBuilder,
+    this.playThreshold = 0.8,
     super.key,
   });
 
@@ -113,6 +194,16 @@ class VideoFeedView extends StatefulWidget {
 
   final String feedId;
 
+  /// 外部控制器：用于页面切换与索引查询
+  ///
+  /// 将一个 [VideoFeedViewController] 传入以获得对组件的外部控制能力。
+  /// 绑定由组件在生命周期内自动完成。
+  final VideoFeedViewController? controller;
+
+  final WidgetBuilder? emptyBuilder;
+
+  final double playThreshold;
+
   @override
   State<VideoFeedView> createState() => _VideoFeedViewState();
 }
@@ -140,6 +231,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.controller?._bind(this);
     // 限制全局图片缓存占用，缓解封面导致的内存压力
     PaintingBinding.instance.imageCache.maximumSizeBytes =
         widget.imageCacheMaxBytes;
@@ -161,6 +253,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
       // 初始化并根据 autoplay 决定是否播放，同时触发重建
       await _initAndPlayVideo(_currentIndex);
       await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
+      VideoFeedSessionManager.instance.setDelegates(
+        widget.feedId,
+        clearOthersKeepCurrent: _disposeOthersKeepCurrent,
+        restoreWindow: () => _manageControllerWindow(_currentIndex),
+      );
     });
     _volumeSub = VolumeManager.instance.stream.listen((vol) async {
       final controllers =
@@ -180,9 +277,18 @@ class _VideoFeedViewState extends State<VideoFeedView>
     WidgetsBinding.instance.removeObserver(this);
     _settleDebounce?.cancel();
     _settleDebounce = null;
+    VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     _disposeAllControllers();
     _volumeSub?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(VideoFeedView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      widget.controller?._bind(this);
+    }
   }
 
   @override
@@ -424,6 +530,17 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _accessOrder.clear();
   }
 
+  Future<void> _disposeOthersKeepCurrent() async {
+    if (widget.items.isEmpty) return;
+    final currentKey = widget.items[_currentIndex].key;
+    final idsToDispose = List<String>.from(_controllerCache.keys);
+    for (final k in idsToDispose) {
+      if (k != currentKey) {
+        await _removeController(k);
+      }
+    }
+  }
+
   /// 管理控制器窗口
   Future<void> _manageControllerWindow(int currentIndex) async {
     await manageControllerWindow(
@@ -515,6 +632,22 @@ class _VideoFeedViewState extends State<VideoFeedView>
         setState(() => _isScrollSettled = false);
       }
       _settleDebounce?.cancel();
+      if (n is ScrollUpdateNotification) {
+        final page = _pageController.page;
+        final len = widget.items.length;
+        if (page != null && len > 0) {
+          final nearest = page.round();
+          final frac = 1.0 - (page - nearest).abs();
+          final threshold = widget.playThreshold.clamp(0.5, 1.0);
+          if (frac >= threshold) {
+            final normalized = nearest % len;
+            if (_currentIndex != normalized) {
+              _currentIndex = normalized;
+              _applyStablePage();
+            }
+          }
+        }
+      }
     } else if (n is ScrollEndNotification ||
         (n is UserScrollNotification && n.direction == ScrollDirection.idle)) {
       _settleDebounce?.cancel();
@@ -529,6 +662,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   @override
   Widget build(BuildContext context) {
+    if (widget.items.isEmpty) {
+      return widget.emptyBuilder?.call(context) ?? const SizedBox.shrink();
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final Size viewportSize = constraints.biggest;
@@ -589,7 +725,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       final item = widget.items[idx];
       if (_preloadedCovers.contains(item.coverUrl)) continue;
       final provider = ResizeImage(
-        NetworkImage(item.coverUrl),
+        ExtendedNetworkImageProvider(item.coverUrl, cache: true),
         width: cacheWidth,
         height: cacheHeight,
       );

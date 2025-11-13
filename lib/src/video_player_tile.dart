@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import 'package:extended_image/extended_image.dart';
 
 /// 单条视频播放组件
 ///
@@ -35,7 +36,7 @@ class VideoPlayerTile extends StatefulWidget {
 }
 
 class _VideoPlayerTileState extends State<VideoPlayerTile>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   /// 加载动画控制器（用于缓冲指示旋转）
   late AnimationController _loadingController;
   bool _isBuffering = false;
@@ -43,6 +44,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   String? _currentVideoId;
   bool _isPlaying = false;
   Key _playerKey = UniqueKey();
+  late AnimationController _overlayFade;
 
   @override
   void initState() {
@@ -52,6 +54,12 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     _oldController = widget.controller;
     _currentVideoId = widget.videoId;
     _addControllerListener();
+    _overlayFade = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 200));
+    _overlayFade.value = 0.0;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _overlayFade.forward();
+    });
   }
 
   void _addControllerListener() {
@@ -89,6 +97,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         });
       }
     }
+    // 保持叠层稳定显示，不在每次更新时重新执行淡入，避免稳态切换时闪烁
   }
 
   @override
@@ -96,6 +105,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     _loadingController.dispose();
     _oldController?.removeListener(_onControllerUpdate);
     _oldController = null;
+    _overlayFade.dispose();
     super.dispose();
   }
 
@@ -166,110 +176,125 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       }
     }
 
-    if (controller == null || !safelyInitialized) {
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          Image.network(
-            widget.coverUrl,
-            fit: BoxFit.cover,
-            filterQuality: FilterQuality.low,
-            cacheWidth: 540,
-            cacheHeight: 960,
-          ),
-          IgnorePointer(
-            child: Center(
-              child: RotationTransition(
-                turns:
-                    Tween<double>(begin: 0, end: 1).animate(_loadingController),
-                child: const CircularProgressIndicator(color: Colors.white),
+    final showCover =
+        controller == null || !safelyInitialized || controller.value.hasError;
+    final coverOpacity = showCover ? 1.0 : 0.0;
+    final Size baseSize =
+        safelyInitialized ? controller!.value.size : widget.viewportSize;
+
+    return ClipRect(
+      child: SizedBox.expand(
+        child: Stack(
+          children: [
+            // 封面
+            Positioned.fill(
+              child: AnimatedOpacity(
+                opacity: coverOpacity,
+                duration: const Duration(milliseconds: 200),
+                child: Builder(builder: (context) {
+                  final dpr = MediaQuery.of(context).devicePixelRatio;
+                  final cacheWidth =
+                      (widget.viewportSize.width * dpr).round();
+                  final cacheHeight =
+                      (widget.viewportSize.height * dpr).round();
+                  return ExtendedImage.network(
+                    widget.coverUrl,
+                    fit: BoxFit.cover,
+                    filterQuality: FilterQuality.low,
+                    cache: true,
+                    clearMemoryCacheWhenDispose: true,
+                    cacheWidth: cacheWidth,
+                    cacheHeight: cacheHeight,
+                  );
+                }),
               ),
             ),
-          ),
-        ],
-      );
-    }
+            // 视频
+            Positioned.fill(
+              child: InkWell(
+                onTap: (){
+                  if (controller == null) return;
+                  final c = controller;
+                  bool canUse = false;
+                  try {
+                    canUse = c.value.isInitialized && !c.value.hasError;
+                  } catch (_) {
+                    canUse = false;
+                  }
+                  if (!canUse) return;
 
-    return GestureDetector(
-      onTap: () {
-        final c = controller;
-        bool canUse = false;
-        try {
-          canUse = c.value.isInitialized && !c.value.hasError;
-        } catch (_) {
-          canUse = false;
-        }
-        if (!canUse) return;
-
-        if (c.value.isPlaying) {
-          c
-              .pause()
-              .then((_) => WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => mounted ? setState(() {}) : null))
-              .catchError((Object e) => debugPrint('Error pausing video: $e'));
-        } else {
-          c
-              .play()
-              .then((_) => WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => mounted ? setState(() {}) : null))
-              .catchError((Object e) => debugPrint('Error playing video: $e'));
-        }
-      },
-      child: ClipRect(
-        child: SizedBox.expand(
-          child: FittedBox(
-            key: _playerKey,
-            fit: BoxFit.cover,
-            alignment: Alignment.center,
-            child: SizedBox(
-              width: controller.value.size.width,
-              height: controller.value.size.height,
-              child: _buildVideoSurface(context, controller),
+                  if (c.value.isPlaying) {
+                    c
+                        .pause()
+                        .then((_) => WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => mounted ? setState(() {}) : null))
+                        .catchError((Object e) => debugPrint('Error pausing video: $e'));
+                  } else {
+                    c
+                        .play()
+                        .then((_) => WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => mounted ? setState(() {}) : null))
+                        .catchError((Object e) => debugPrint('Error playing video: $e'));
+                  }
+                },
+                child: FittedBox(
+                  key: _playerKey,
+                  fit: BoxFit.cover,
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    width: baseSize.width,
+                    height: baseSize.height,
+                    child: controller != null
+                        ? VideoPlayer(controller)
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+              ),
             ),
-          ),
+            if (controller != null) ..._buildOverlays(context, controller),
+            if (widget.bizWidgets != null)
+              AnimatedOpacity(
+                opacity: showCover? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 120),
+                child: IgnorePointer(
+                  ignoring: showCover,
+                  child: Stack(children: widget.bizWidgets!),
+                ),
+              )
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildVideoSurface(
+  List<Widget> _buildOverlays(
       BuildContext context, VideoPlayerController controller) {
-    /// 视频表面：底层为 VideoPlayer，叠加缓冲/错误/暂停，以及业务自定义组件
-    final child = Stack(
-      children: [
-        VideoPlayer(controller),
-        // 加载/缓冲中显示旋转进度
-        if (_isBuffering)
-          IgnorePointer(
-            child: Center(
-              child: RotationTransition(
-                turns:
-                    Tween<double>(begin: 0, end: 1).animate(_loadingController),
-                child: const CircularProgressIndicator(color: Colors.white),
-              ),
+    return [
+      if (_isBuffering)
+        IgnorePointer(
+          child: Center(
+            child: RotationTransition(
+              turns:
+                  Tween<double>(begin: 0, end: 1).animate(_loadingController),
+              child: const CircularProgressIndicator(color: Colors.white),
             ),
           ),
-        // 错误状态提示
-        if (controller.value.hasError)
-          const IgnorePointer(
-            child: Center(
-              child:
-                  Icon(Icons.error_outline, color: Colors.redAccent, size: 72),
-            ),
+        ),
+      if (controller.value.hasError)
+        const IgnorePointer(
+          child: Center(
+            child: Icon(Icons.error_outline, color: Colors.redAccent, size: 72),
           ),
-        // 暂停时显示暂停图标覆盖层（不拦截点击）
-        if (!controller.value.isPlaying &&
-            !_isBuffering &&
-            !controller.value.hasError)
-          const IgnorePointer(
-            child: Center(
-              child: Icon(Icons.pause_circle_filled,
-                  color: Colors.white, size: 80),
-            ),
+        ),
+      if (!controller.value.isPlaying &&
+          !_isBuffering &&
+          !controller.value.hasError)
+        const IgnorePointer(
+          child: Center(
+            child:
+                Icon(Icons.pause_circle_filled, color: Colors.white, size: 80),
           ),
-        if (widget.bizWidgets != null) ...widget.bizWidgets!,
-      ],
-    );
-    return child;
+        ),
+    ];
   }
 }
