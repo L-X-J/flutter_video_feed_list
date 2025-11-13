@@ -173,6 +173,7 @@ class VideoFeedView extends StatefulWidget {
     this.videoPlayerOptions,
     this.emptyBuilder,
     this.playThreshold = 0.8,
+    this.allowUserScroll = true,
     super.key,
   });
 
@@ -246,6 +247,7 @@ class VideoFeedView extends StatefulWidget {
   final WidgetBuilder? emptyBuilder;
 
   final double playThreshold;
+  final bool allowUserScroll;
 
   @override
   State<VideoFeedView> createState() => _VideoFeedViewState();
@@ -730,7 +732,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
             itemCount: widget.infiniteScroll
                 ? (widget.items.isEmpty ? 0 : 1000000)
                 : widget.items.length,
-            physics: const AlwaysScrollableScrollPhysics(),
+            physics: widget.allowUserScroll
+                ? const AlwaysScrollableScrollPhysics()
+                : const NeverScrollableScrollPhysics(),
             preloadPagesCount: _effectivePreload,
             onPageChanged: _handlePageChange,
             itemBuilder: (context, index) {
