@@ -136,12 +136,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     final isBuffering = controller.value.isBuffering;
     final isPlaying = controller.value.isPlaying;
 
-    bool shouldShowBuffering = isBuffering;
-    if ((isPlaying && controller.value.position > Duration.zero) ||
-        (controller.value.position > Duration.zero &&
-            controller.value.duration.inMilliseconds > 0)) {
-      shouldShowBuffering = false;
-    }
+    final bool shouldShowBuffering = isBuffering && !controller.value.hasError;
 
     if (_isBuffering != shouldShowBuffering || _isPlaying != isPlaying) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -290,7 +285,11 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             child: RotationTransition(
               turns:
                   Tween<double>(begin: 0, end: 1).animate(_loadingController),
-              child: const CircularProgressIndicator(color: Colors.white),
+              child: const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+              ),
             ),
           ),
         ),
@@ -305,8 +304,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
           !controller.value.hasError)
         const IgnorePointer(
           child: Center(
-            child:
-                Icon(Icons.pause_circle_filled, color: Colors.white, size: 80),
+            child: Icon(Icons.pause_circle_filled, color: Colors.white, size: 48),
           ),
         ),
     ];
