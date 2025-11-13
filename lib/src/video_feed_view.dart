@@ -74,12 +74,14 @@ class VideoFeedViewController {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.pauseGroup(s.widget.feedId);
+    if (s.mounted) s.setState(() {});
   }
 
   Future<void> resumeThisFeed() async {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.resumeGroup(s.widget.feedId);
+    if (s.mounted) s.setState(() {});
   }
 
   bool isPlayingThisFeed() {
@@ -92,14 +94,19 @@ class VideoFeedViewController {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.pauseOthers(s.widget.feedId);
+    if (s.mounted) s.setState(() {});
   }
 
   Future<void> pauseAll() async {
     await VideoFeedSessionManager.instance.pauseAll();
+    final s = _state;
+    if (s != null && s.mounted) s.setState(() {});
   }
 
   Future<void> resumeAll() async {
     await VideoFeedSessionManager.instance.resumeAll();
+    final s = _state;
+    if (s != null && s.mounted) s.setState(() {});
   }
 
   Future<void> releaseThisFeed() async {
@@ -490,6 +497,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       try {
         await VideoFeedSessionManager.instance
             .playExclusive(widget.feedId, controller);
+        if (mounted) setState(() {});
       } catch (e) {
         debugPrint('Error playing video: $e');
       }
