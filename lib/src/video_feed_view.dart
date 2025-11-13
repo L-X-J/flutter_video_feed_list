@@ -233,6 +233,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   double _devicePixelRatio = 1.0;
   StreamSubscription<double>? _volumeSub;
   bool _released = false;
+  bool _tearingDown = false;
 
   @override
   void initState() {
@@ -485,7 +486,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
             await controller.pause();
           }
         } catch (_) {}
-        if (mounted) {
+        if (mounted && !_tearingDown) {
           setState(() {});
         }
         await Future<void>.delayed(const Duration(milliseconds: 0));
@@ -530,7 +531,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   /// 释放所有控制器
   Future<void> _disposeAllControllers() async {
-    _pageController.dispose();
+    _tearingDown = true;
     final keys = List<String>.from(_controllerCache.keys);
     for (final id in keys) {
       await _removeController(id);
@@ -538,6 +539,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _controllerCache.clear();
     _accessOrder.clear();
     VideoFeedSessionManager.instance.clearGroup(widget.feedId);
+    _tearingDown = false;
   }
 
   Future<void> _disposeOthersKeepCurrent() async {
