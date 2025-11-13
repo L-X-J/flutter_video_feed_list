@@ -303,6 +303,12 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final wasActive = _isAppActive;
     _isAppActive = state == AppLifecycleState.resumed;
     if (_isAppActive && !wasActive) {
+      final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
+      if (!isCurrentRoute) {
+        VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
+        return;
+      }
+      VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
       _cleanupAndReinitializeCurrentVideo();
     } else if (!_isAppActive && wasActive) {
       _pauseAllControllers();
