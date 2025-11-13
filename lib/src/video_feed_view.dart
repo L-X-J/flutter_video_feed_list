@@ -448,7 +448,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
         controller.value.isInitialized &&
         !controller.value.isPlaying) {
       try {
-        await VideoFeedSessionManager.instance.playExclusive(widget.feedId, controller);
+        await VideoFeedSessionManager.instance
+            .playExclusive(widget.feedId, controller);
       } catch (e) {
         debugPrint('Error playing video: $e');
       }
@@ -480,14 +481,16 @@ class _VideoFeedViewState extends State<VideoFeedView>
         _controllerCache.remove(key);
         _accessOrder.remove(key);
         VideoFeedSessionManager.instance.unregister(widget.feedId, controller);
-        // 触发一次重建，让 UI 不再持有已移除的控制器，避免传递到子组件后被使用
+        try {
+          if (controller.value.isInitialized && controller.value.isPlaying) {
+            await controller.pause();
+          }
+        } catch (_) {}
         if (mounted) {
           setState(() {});
         }
+        await Future<void>.delayed(const Duration(milliseconds: 0));
         try {
-          if (controller.value.isInitialized) {
-            await controller.pause();
-          }
           await controller.dispose();
         } catch (e) {
           debugPrint('Error disposing controller: $e');
@@ -535,6 +538,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
     _controllerCache.clear();
     _accessOrder.clear();
+    VideoFeedSessionManager.instance.clearGroup(widget.feedId);
   }
 
   Future<void> _disposeOthersKeepCurrent() async {
