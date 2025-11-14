@@ -290,14 +290,18 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
             if (controller != null) ..._buildOverlays(context, controller),
             if (widget.bizWidgets != null)
-              AnimatedOpacity(
-                opacity: showCover ? 0.0 : 1.0,
-                duration: const Duration(milliseconds: 120),
-                child: IgnorePointer(
-                  ignoring: showCover,
-                  child: Stack(children: widget.bizWidgets!),
-                ),
-              )
+              FutureBuilder(
+                  future: Future.delayed(const Duration(milliseconds: 120)),
+                  builder: (_, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.done &&
+                        !showCover) {
+                      return IgnorePointer(
+                        ignoring: showCover,
+                        child: Stack(children: widget.bizWidgets!),
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  })
           ],
         ),
       ),
