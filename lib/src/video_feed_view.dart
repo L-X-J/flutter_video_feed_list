@@ -764,6 +764,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
                   coverUrl: item.coverUrl,
                   viewportSize: viewportSize,
                   groupId: widget.feedId,
+                  isCurrent: isCurrent,
                   bizWidgets: widget.bizWidgetsBuilder
                       ?.call(context, item, logicalIndex),
                 ),

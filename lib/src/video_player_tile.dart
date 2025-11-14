@@ -15,6 +15,7 @@ class VideoPlayerTile extends StatefulWidget {
     required this.viewportSize,
     this.bizWidgets,
     this.groupId,
+    this.isCurrent = false,
     super.key,
   });
 
@@ -33,6 +34,7 @@ class VideoPlayerTile extends StatefulWidget {
   /// 业务叠层组件列表（显示头像/点赞/描述等），覆盖在视频之上
   final List<Widget>? bizWidgets;
   final String? groupId;
+  final bool isCurrent;
 
   @override
   State<VideoPlayerTile> createState() => _VideoPlayerTileState();
@@ -202,8 +204,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                 duration: const Duration(milliseconds: 200),
                 child: Builder(builder: (context) {
                   final dpr = MediaQuery.of(context).devicePixelRatio;
-                  final cacheWidth =
-                      (widget.viewportSize.width * dpr).round();
+                  final cacheWidth = (widget.viewportSize.width * dpr).round();
                   final cacheHeight =
                       (widget.viewportSize.height * dpr).round();
                   return ExtendedImage.network(
@@ -221,7 +222,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             // 视频
             Positioned.fill(
               child: InkWell(
-                onTap: (){
+                onTap: () {
                   if (controller == null) return;
                   final c = controller;
                   bool canUse = false;
@@ -235,15 +236,19 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   if (c.value.isPlaying) {
                     c
                         .pause()
-                        .then((_) => WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => mounted ? setState(() {}) : null))
-                        .catchError((Object e) => debugPrint('Error pausing video: $e'));
+                        .then((_) => WidgetsBinding.instance
+                            .addPostFrameCallback(
+                                (_) => mounted ? setState(() {}) : null))
+                        .catchError((Object e) =>
+                            debugPrint('Error pausing video: $e'));
                   } else {
                     VideoFeedSessionManager.instance
                         .playExclusive(widget.groupId ?? '', c)
-                        .then((_) => WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => mounted ? setState(() {}) : null))
-                        .catchError((Object e) => debugPrint('Error playing video: $e'));
+                        .then((_) => WidgetsBinding.instance
+                            .addPostFrameCallback(
+                                (_) => mounted ? setState(() {}) : null))
+                        .catchError((Object e) =>
+                            debugPrint('Error playing video: $e'));
                   }
                 },
                 child: FittedBox(
@@ -260,10 +265,33 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                 ),
               ),
             ),
+
+            if (showCover)
+              FutureBuilder(
+                  future: Future.delayed(const Duration(milliseconds: 300)),
+                  builder: (_, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.done &&
+                        showCover) {
+                      return const Positioned.fill(
+                        child: IgnorePointer(
+                          child: Center(
+                            child: SizedBox(
+                              width: 40,
+                              height: 40,
+                              child: CircularProgressIndicator(
+                                  color: Colors.white, strokeWidth: 4),
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  }),
+
             if (controller != null) ..._buildOverlays(context, controller),
             if (widget.bizWidgets != null)
               AnimatedOpacity(
-                opacity: showCover? 0.0 : 1.0,
+                opacity: showCover ? 0.0 : 1.0,
                 duration: const Duration(milliseconds: 120),
                 child: IgnorePointer(
                   ignoring: showCover,
@@ -288,7 +316,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
               child: const SizedBox(
                 width: 28,
                 height: 28,
-                child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2.5),
               ),
             ),
           ),
@@ -304,7 +333,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
           !controller.value.hasError)
         const IgnorePointer(
           child: Center(
-            child: Icon(Icons.pause_circle_filled, color: Colors.white, size: 48),
+            child:
+                Icon(Icons.pause_circle_filled, color: Colors.white, size: 48),
           ),
         ),
     ];
