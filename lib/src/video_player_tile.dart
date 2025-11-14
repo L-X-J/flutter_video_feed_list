@@ -52,7 +52,6 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   Key _playerKey = UniqueKey();
   late AnimationController _overlayFade;
   bool _coverLoadingVisible = false;
-  Timer? _coverLoadingDelayTimer;
   bool _bizReady = false;
   Timer? _bizDelayTimer;
   bool _lastShowCover = false;
@@ -123,7 +122,6 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     } catch (_) {}
     _oldController = null;
     _overlayFade.dispose();
-    _coverLoadingDelayTimer?.cancel();
     _bizDelayTimer?.cancel();
     super.dispose();
   }
@@ -190,11 +188,13 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       }
     }
 
-    bool hasError = true;
-    try {
-      hasError = controller?.value.hasError ?? true;
-    } catch (_) {
-      hasError = true;
+    bool hasError = false;
+    if (controller != null) {
+      try {
+        hasError = controller.value.hasError;
+      } catch (_) {
+        hasError = true;
+      }
     }
     final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
@@ -206,15 +206,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       if (showCover) {
         _bizDelayTimer?.cancel();
         _bizReady = false;
-        _coverLoadingDelayTimer?.cancel();
-        _coverLoadingDelayTimer = Timer(const Duration(milliseconds: 300), () {
-          if (!mounted) return;
-          setState(() {
-            _coverLoadingVisible = true;
-          });
-        });
+        _coverLoadingVisible = true;
       } else {
-        _coverLoadingDelayTimer?.cancel();
         _coverLoadingVisible = false;
         _bizDelayTimer?.cancel();
         _bizDelayTimer = Timer(const Duration(milliseconds: 120), () {
