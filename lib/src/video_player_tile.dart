@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:extended_image/extended_image.dart';
@@ -50,6 +51,11 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   bool _isPlaying = false;
   Key _playerKey = UniqueKey();
   late AnimationController _overlayFade;
+  bool _coverLoadingVisible = false;
+  Timer? _coverLoadingDelayTimer;
+  bool _bizReady = false;
+  Timer? _bizDelayTimer;
+  bool _lastShowCover = false;
 
   @override
   void initState() {
@@ -117,6 +123,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     } catch (_) {}
     _oldController = null;
     _overlayFade.dispose();
+    _coverLoadingDelayTimer?.cancel();
+    _bizDelayTimer?.cancel();
     super.dispose();
   }
 
@@ -193,6 +201,31 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     final Size baseSize =
         safelyInitialized ? controller!.value.size : widget.viewportSize;
 
+    if (showCover != _lastShowCover) {
+      _lastShowCover = showCover;
+      if (showCover) {
+        _bizDelayTimer?.cancel();
+        _bizReady = false;
+        _coverLoadingDelayTimer?.cancel();
+        _coverLoadingDelayTimer = Timer(const Duration(milliseconds: 300), () {
+          if (!mounted) return;
+          setState(() {
+            _coverLoadingVisible = true;
+          });
+        });
+      } else {
+        _coverLoadingDelayTimer?.cancel();
+        _coverLoadingVisible = false;
+        _bizDelayTimer?.cancel();
+        _bizDelayTimer = Timer(const Duration(milliseconds: 120), () {
+          if (!mounted) return;
+          setState(() {
+            _bizReady = true;
+          });
+        });
+      }
+    }
+
     return ClipRect(
       child: SizedBox.expand(
         child: Stack(
@@ -266,42 +299,30 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
               ),
             ),
 
-            if (showCover)
-              FutureBuilder(
-                  future: Future.delayed(const Duration(milliseconds: 300)),
-                  builder: (_, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.done &&
-                        showCover) {
-                      return const Positioned.fill(
-                        child: IgnorePointer(
-                          child: Center(
-                            child: SizedBox(
-                              width: 40,
-                              height: 40,
-                              child: CircularProgressIndicator(
-                                  color: Colors.white, strokeWidth: 4),
-                            ),
-                          ),
-                        ),
-                      );
-                    }
-                    return const SizedBox.shrink();
-                  }),
+            if (showCover && widget.isCurrent && !hasError && _coverLoadingVisible)
+              const Positioned.fill(
+                child: IgnorePointer(
+                  child: Center(
+                    child: SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2.5),
+                    ),
+                  ),
+                ),
+              ),
 
             if (controller != null) ..._buildOverlays(context, controller),
             if (widget.bizWidgets != null)
-              FutureBuilder(
-                  future: Future.delayed(const Duration(milliseconds: 120)),
-                  builder: (_, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.done &&
-                        !showCover) {
-                      return IgnorePointer(
-                        ignoring: showCover,
-                        child: Stack(children: widget.bizWidgets!),
-                      );
-                    }
-                    return const SizedBox.shrink();
-                  })
+              AnimatedOpacity(
+                opacity: (_bizReady && !showCover) ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 120),
+                child: IgnorePointer(
+                  ignoring: !(_bizReady && !showCover),
+                  child: Stack(children: widget.bizWidgets!),
+                ),
+              ),
           ],
         ),
       ),
