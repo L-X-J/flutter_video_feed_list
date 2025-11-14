@@ -55,6 +55,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   bool _bizReady = false;
   Timer? _bizDelayTimer;
   bool _lastShowCover = false;
+  bool _bizInitApplied = false;
 
   @override
   void initState() {
@@ -207,6 +208,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         _bizDelayTimer?.cancel();
         _bizReady = false;
         _coverLoadingVisible = true;
+        _bizInitApplied = false;
       } else {
         _coverLoadingVisible = false;
         _bizDelayTimer?.cancel();
@@ -217,6 +219,16 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
           });
         });
       }
+    }
+
+    if (!showCover && !_bizReady && !_bizInitApplied && _bizDelayTimer == null) {
+      _bizInitApplied = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          _bizReady = true;
+        });
+      });
     }
 
     return ClipRect(
