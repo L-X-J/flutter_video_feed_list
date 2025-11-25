@@ -100,13 +100,20 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       _playerKey = UniqueKey();
       _addControllerListener();
 
+      // 同步更新缓冲和播放状态
       final bool shouldUpdateBuffering =
           widget.controller?.value.isBuffering ?? false;
-      if (mounted && _isBuffering != shouldUpdateBuffering) {
+      final bool shouldUpdatePlaying =
+          widget.controller?.value.isPlaying ?? false;
+      if (mounted &&
+          (_isBuffering != shouldUpdateBuffering ||
+              _isPlaying != shouldUpdatePlaying)) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             setState(() {
               _isBuffering = shouldUpdateBuffering;
+              _isPlaying = shouldUpdatePlaying;
+              _updateLoadingAnimation();
             });
           }
         });
@@ -137,7 +144,13 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
     if (controller.value.hasError) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _isBuffering = false);
+        if (mounted) {
+          setState(() {
+            _isBuffering = false;
+            _isPlaying = false;
+            _updateLoadingAnimation();
+          });
+        }
       });
       return;
     }
@@ -221,7 +234,10 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       }
     }
 
-    if (!showCover && !_bizReady && !_bizInitApplied && _bizDelayTimer == null) {
+    if (!showCover &&
+        !_bizReady &&
+        !_bizInitApplied &&
+        _bizDelayTimer == null) {
       _bizInitApplied = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -271,22 +287,35 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   }
                   if (!canUse) return;
 
-                  if (c.value.isPlaying) {
-                    c
-                        .pause()
-                        .then((_) => WidgetsBinding.instance
-                            .addPostFrameCallback(
-                                (_) => mounted ? setState(() {}) : null))
-                        .catchError((Object e) =>
-                            debugPrint('Error pausing video: $e'));
+                  final wasPlaying = c.value.isPlaying;
+                  if (wasPlaying) {
+                    // 立即更新状态，避免显示延迟
+                    setState(() {
+                      _isPlaying = false;
+                    });
+                    c.pause().then((_) {
+                      if (mounted) {
+                        WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => mounted ? setState(() {}) : null);
+                      }
+                    }).catchError((Object e) {
+                      debugPrint('Error pausing video: $e');
+                    });
                   } else {
+                    // 立即更新状态，避免显示延迟
+                    setState(() {
+                      _isPlaying = true;
+                    });
                     VideoFeedSessionManager.instance
                         .playExclusive(widget.groupId ?? '', c)
-                        .then((_) => WidgetsBinding.instance
-                            .addPostFrameCallback(
-                                (_) => mounted ? setState(() {}) : null))
-                        .catchError((Object e) =>
-                            debugPrint('Error playing video: $e'));
+                        .then((_) {
+                      if (mounted) {
+                        WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => mounted ? setState(() {}) : null);
+                      }
+                    }).catchError((Object e) {
+                      debugPrint('Error playing video: $e');
+                    });
                   }
                 },
                 child: FittedBox(
@@ -296,7 +325,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   child: SizedBox(
                     width: baseSize.width,
                     height: baseSize.height,
-                    child: (!showCover && controller != null)
+                    child: !showCover
                         ? VideoPlayer(controller)
                         : const SizedBox.shrink(),
                   ),
@@ -304,7 +333,10 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
               ),
             ),
 
-            if (showCover && widget.isCurrent && !hasError && _coverLoadingVisible)
+            if (showCover &&
+                widget.isCurrent &&
+                !hasError &&
+                _coverLoadingVisible)
               const Positioned.fill(
                 child: IgnorePointer(
                   child: Center(
@@ -336,7 +368,24 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
   List<Widget> _buildOverlays(
       BuildContext context, VideoPlayerController controller) {
+    // 安全获取控制器状态
+    bool hasError = false;
+    bool isInitialized = false;
+    try {
+      hasError = controller.value.hasError;
+      isInitialized = controller.value.isInitialized;
+    } catch (_) {
+      hasError = true;
+      isInitialized = false;
+    }
+
+    // 只有在视频已初始化时才显示叠层
+    if (!isInitialized) {
+      return [];
+    }
+
     return [
+      // 缓冲指示器：优先显示，当正在缓冲时显示
       if (_isBuffering)
         IgnorePointer(
           child: Center(
@@ -352,15 +401,16 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             ),
           ),
         ),
-      if (controller.value.hasError)
+      // 错误指示器：有错误时显示
+      if (hasError)
         const IgnorePointer(
           child: Center(
             child: Icon(Icons.error_outline, color: Colors.redAccent, size: 72),
           ),
         ),
-      if (!controller.value.isPlaying &&
-          !_isBuffering &&
-          !controller.value.hasError)
+      // 暂停图标：只在视频暂停、没有缓冲、没有错误时显示
+      // 使用 _isPlaying 而不是 controller.value.isPlaying 确保状态同步
+      if (!_isPlaying && !_isBuffering && !hasError)
         const IgnorePointer(
           child: Center(
             child:
