@@ -22,9 +22,14 @@ class VideoFeedDemoApp extends StatelessWidget {
 }
 
 /// 示例页面：构建数据并展示视频信息流组件
-class VideoFeedDemoPage extends StatelessWidget {
+class VideoFeedDemoPage extends StatefulWidget {
   const VideoFeedDemoPage({super.key});
 
+  @override
+  State<VideoFeedDemoPage> createState() => _VideoFeedDemoPageState();
+}
+
+class _VideoFeedDemoPageState extends State<VideoFeedDemoPage> {
   /// 解析多行 `name,cover,video` 数据为 VideoItem 列表
   List<IVideoItem> _parseUserData(String raw) {
     String clean(String s) => s
@@ -52,8 +57,11 @@ class VideoFeedDemoPage extends StatelessWidget {
     return items;
   }
 
+  final List<IVideoItem> data = [];
+
   @override
-  Widget build(BuildContext context) {
+  void initState() {
+    super.initState();
     const raw =
         '@月月,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/common/49bb22388f194a2eb9d7c7e4d4106c71_20250729061546.jpg,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/h264_video/4f3a128ef4f849d4a5f638dd93c1a066_20250811095544.mp4\n'
         '@莎莎,https://yuanqu-test.oss-cn-hangzhou.aliyuncs.com/public/common/96abf08e4e094353a07492d85a46d07d_20250717133055.jpg,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/h264_video/616b729389924c8c988347f8be3a193e_20250811094517.mp4\n'
@@ -75,8 +83,14 @@ class VideoFeedDemoPage extends StatelessWidget {
         '@c酱,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/common/a2c6114994e140c18ab21a0c43107ca8_20250901024809.png,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/h264_video/3455aa48655449f7a8b3c596888ec8c4_20250901024808.mp4\n'
         '@莎纱,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/common/01fdd7b987214f5684695737ca33ad64_20250916065551.jpg,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/h264_video/b48b9929d4c64e53904fba6b281b6bc6_20250916065556.mp4\n'
         '@悦悦,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/common/7389a4e7cde841c198f2a12aae2d884f_20250916075250.jpeg,https://yq-1363695004.cos.ap-shanghai.myqcloud.com/public/h264_video/c5f906fa0c98491393bbbfe933d7d49d_20250916075252.mp4';
+    Future.delayed(Duration(seconds: 2), () {
+      data.addAll(_parseUserData(raw));
+      setState(() {});
+    });
+  }
 
-    final items = _parseUserData(raw);
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: MediaQuery.removePadding(
@@ -84,66 +98,25 @@ class VideoFeedDemoPage extends StatelessWidget {
         removeTop: true,
         removeBottom: true,
         child: VideoFeedView(
-          feedId: 'demo',
-          items: items,
-          autoplay: true,
+          feedId: "demo",
+          items: data,
+          emptyBuilder: (_) {
+            return Center(
+              child: Text(
+                "你来的太早了～\n还没有您的专属内容哦",
+                textAlign: TextAlign.center,
+              ),
+            );
+          },
           loop: true,
           preloadAround: 1,
           preloadCoverAround: 2,
           maxCacheControllers: 2,
-          settleDelayMs: 0,
-          ecoMode: true,
+          settleDelayMs: 10,
           showControllerOnlyOnCurrentPage: true,
           aggressiveOnFastScroll: true,
-          viewType: VideoViewType.platformView,
+          // viewType: VideoViewType.platformView,
           enableLogs: true,
-          bizWidgetsBuilder: (ctx, item, idx) {
-            return [
-              Positioned(
-                right: 16,
-                bottom: 100,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircleAvatar(radius: 24),
-                    SizedBox(height: 16),
-                    _ActionButton(icon: Icons.favorite, label: '1.2w'),
-                    SizedBox(height: 16),
-                    _ActionButton(icon: Icons.comment, label: '356'),
-                    SizedBox(height: 16),
-                    _ActionButton(icon: Icons.share, label: '分享'),
-                  ],
-                ),
-              ),
-              Positioned(
-                left: 16,
-                right: 80,
-                bottom: 32,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      item.id ?? '用户',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      '这是一个示例视频描述，仿抖音布局',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                  ],
-                ),
-              ),
-            ];
-          },
-          onIndexChanged: (i) {},
         ),
       ),
     );
@@ -152,8 +125,10 @@ class VideoFeedDemoPage extends StatelessWidget {
 
 class _ActionButton extends StatelessWidget {
   const _ActionButton({required this.icon, required this.label});
+
   final IconData icon;
   final String label;
+
   @override
   Widget build(BuildContext context) {
     return Column(
