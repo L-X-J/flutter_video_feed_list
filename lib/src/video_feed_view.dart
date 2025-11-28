@@ -663,6 +663,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
       await _getOrCreateController(currentItem);
       if (_autoplayEnabled) await _playController(currentKey);
+      if (mounted) setState(() {});
       widget.onIndexChanged?.call(_currentIndex);
       logIf(widget.enableLogs,
           'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}');

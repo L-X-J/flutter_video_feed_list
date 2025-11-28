@@ -49,6 +49,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   VideoPlayerController? _oldController;
   String? _currentVideoId;
   bool _isPlaying = false;
+  bool _isInitialized = false;
   Key _playerKey = UniqueKey();
   late AnimationController _overlayFade;
   bool _coverLoadingVisible = false;
@@ -78,6 +79,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       try {
         _isBuffering = widget.controller!.value.isBuffering;
         _isPlaying = widget.controller!.value.isPlaying;
+        _isInitialized = widget.controller!.value.isInitialized;
         _updateLoadingAnimation();
         widget.controller!.addListener(_onControllerUpdate);
       } catch (_) {}
@@ -105,14 +107,18 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
           widget.controller?.value.isBuffering ?? false;
       final bool shouldUpdatePlaying =
           widget.controller?.value.isPlaying ?? false;
+      final bool shouldUpdateInitialized =
+          widget.controller?.value.isInitialized ?? false;
       if (mounted &&
           (_isBuffering != shouldUpdateBuffering ||
-              _isPlaying != shouldUpdatePlaying)) {
+              _isPlaying != shouldUpdatePlaying ||
+              _isInitialized != shouldUpdateInitialized)) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             setState(() {
               _isBuffering = shouldUpdateBuffering;
               _isPlaying = shouldUpdatePlaying;
+              _isInitialized = shouldUpdateInitialized;
               _updateLoadingAnimation();
             });
           }
@@ -157,15 +163,19 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
     final isBuffering = controller.value.isBuffering;
     final isPlaying = controller.value.isPlaying;
+    final isInitialized = controller.value.isInitialized;
 
     final bool shouldShowBuffering = isBuffering && !controller.value.hasError;
 
-    if (_isBuffering != shouldShowBuffering || _isPlaying != isPlaying) {
+    if (_isBuffering != shouldShowBuffering ||
+        _isPlaying != isPlaying ||
+        _isInitialized != isInitialized) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           setState(() {
             _isBuffering = shouldShowBuffering;
             _isPlaying = isPlaying;
+            _isInitialized = isInitialized;
             _updateLoadingAnimation();
           });
         }
