@@ -1,4 +1,4 @@
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:preload_page_view/preload_page_view.dart';
 import 'package:video_player/video_player.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 import 'models/video_item.dart';
 import 'video_player_tile.dart';
@@ -74,6 +75,7 @@ class VideoFeedViewController {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.pauseGroup(s.widget.feedId);
+    // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
   }
 
@@ -81,6 +83,7 @@ class VideoFeedViewController {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.resumeGroup(s.widget.feedId);
+    // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
   }
 
@@ -94,18 +97,21 @@ class VideoFeedViewController {
     final s = _state;
     if (s == null) return;
     await VideoFeedSessionManager.instance.pauseOthers(s.widget.feedId);
+    // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
   }
 
   Future<void> pauseAll() async {
     await VideoFeedSessionManager.instance.pauseAll();
     final s = _state;
+    // ignore: invalid_use_of_protected_member
     if (s != null && s.mounted) s.setState(() {});
   }
 
   Future<void> resumeAll() async {
     await VideoFeedSessionManager.instance.resumeAll();
     final s = _state;
+    // ignore: invalid_use_of_protected_member
     if (s != null && s.mounted) s.setState(() {});
   }
 
@@ -138,6 +144,7 @@ class VideoFeedViewController {
       if (canPlay) {
         await VideoFeedSessionManager.instance
             .playExclusive(s.widget.feedId, c);
+        // ignore: invalid_use_of_protected_member
         if (s.mounted) s.setState(() {});
       }
     }
@@ -280,6 +287,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
   bool _released = false;
   bool _tearingDown = false;
   bool _autoplayEnabled = true;
+  bool _isHuawei = false;
+  bool _deviceCheckDone = false;
 
   @override
   void initState() {
@@ -302,6 +311,18 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _effectiveMaxControllers =
         widget.ecoMode ? widget.maxControllersEco : widget.maxCacheControllers;
     _autoplayEnabled = widget.autoplay;
+
+    // Start device check
+    _checkDevice().then((_) {
+      if (mounted) {
+        // Check if we need to re-initialize the current controller if it was already created with wrong type?
+        // Actually, _initAndPlayVideo runs in postFrameCallback, which might be after this check returns
+        // if _checkDevice is super fast, but usually _checkDevice is async.
+        // We'll handle the logic in _createController to await this if needed or just let the fallback handle it if check isn't done.
+        // But ideally we want to know before first creation.
+      }
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _preloadCoversAround(_currentIndex);
       await _manageControllerWindow(_currentIndex);
@@ -325,6 +346,26 @@ class _VideoFeedViewState extends State<VideoFeedView>
         } catch (_) {}
       }
     });
+  }
+
+  Future<void> _checkDevice() async {
+    if (kIsWeb || !Platform.isAndroid) {
+      _deviceCheckDone = true;
+      return;
+    }
+    try {
+      final deviceInfo = DeviceInfoPlugin();
+      final androidInfo = await deviceInfo.androidInfo;
+      final manufacturer = androidInfo.manufacturer.toLowerCase();
+      final brand = androidInfo.brand.toLowerCase();
+      if (manufacturer.contains('huawei') || brand.contains('huawei')) {
+        _isHuawei = true;
+      }
+    } catch (e) {
+      debugPrint('Device info check failed: $e');
+    } finally {
+      _deviceCheckDone = true;
+    }
   }
 
   @override
@@ -419,6 +460,16 @@ class _VideoFeedViewState extends State<VideoFeedView>
   /// 创建并初始化控制器
   Future<VideoPlayerController?> _createController(IVideoItem item) async {
     final key = item.key;
+
+    // 如果还没检查完设备信息且在Android上，等待一下
+    if (!kIsWeb && Platform.isAndroid && !_deviceCheckDone) {
+      await _checkDevice();
+    }
+
+    // 如果是华为设备，强制使用 platformView
+    final VideoViewType effectiveViewType =
+        _isHuawei ? VideoViewType.platformView : widget.viewType;
+
     try {
       late VideoPlayerController controller;
 
@@ -426,7 +477,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         controller = VideoPlayerController.networkUrl(
           Uri.parse(item.videoUrl),
           videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: widget.viewType,
+          viewType: effectiveViewType,
         );
       } else {
         final cacheManager = DefaultCacheManager();
@@ -436,7 +487,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         controller = VideoPlayerController.file(
           file,
           videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: widget.viewType,
+          viewType: effectiveViewType,
         );
       }
 
@@ -453,7 +504,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       if (widget.enableLogs) {
         final s = controller.value.size;
         debugPrint(
-            'init ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
+            'init ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$effectiveViewType');
       }
 
       return controller;
@@ -463,7 +514,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         final controller = VideoPlayerController.networkUrl(
           Uri.parse(item.videoUrl),
           videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: widget.viewType,
+          viewType: effectiveViewType,
         );
         await controller.initialize();
         await controller.setLooping(widget.loop);
@@ -478,10 +529,47 @@ class _VideoFeedViewState extends State<VideoFeedView>
         if (widget.enableLogs) {
           final s = controller.value.size;
           debugPrint(
-              'init(network) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
+              'init(network) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$effectiveViewType');
         }
         return controller;
       } catch (e2) {
+        // 如果前面都失败了，且当前不是 platformView，尝试切换到 platformView (SurfaceView)
+        // 这通常能解决部分华为/海思芯片(OMX.hisi)的硬解码初始化失败问题以及其他 SurfaceTexture 兼容性问题
+        // 如果 effectiveViewType 已经是 platformView 了，那这一步其实是重复的，不过为了稳健性（或者如果之前因为某种原因没用上）再试一次也无妨
+        // 这里的逻辑主要针对非华为设备或者检测失败的情况下的后备
+        if (!kIsWeb && effectiveViewType != VideoViewType.platformView) {
+          try {
+            if (widget.enableLogs) {
+              debugPrint(
+                  'Attempting fallback to platformView for ${item.key} (error: $e2)');
+            }
+            final controller = VideoPlayerController.networkUrl(
+              Uri.parse(item.videoUrl),
+              videoPlayerOptions: widget.videoPlayerOptions,
+              viewType: VideoViewType.platformView,
+            );
+            await controller.initialize();
+            await controller.setLooping(widget.loop);
+            try {
+              await controller.setVolume(VolumeManager.instance.volume);
+            } catch (_) {}
+            _controllerCache[key] = controller;
+            VideoFeedSessionManager.instance
+                .register(widget.feedId, controller);
+            _touchController(key);
+            _enforceCacheLimit(
+                maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
+            if (widget.enableLogs) {
+              final s = controller.value.size;
+              debugPrint(
+                  'init(platformView) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
+            }
+            return controller;
+          } catch (e3) {
+            debugPrint('Controller init failed all fallbacks: $e3');
+            return null;
+          }
+        }
         debugPrint('Controller init failed both file and network: $e2');
         return null;
       }
@@ -500,21 +588,6 @@ class _VideoFeedViewState extends State<VideoFeedView>
         if (mounted) setState(() {});
       } catch (e) {
         debugPrint('Error playing video: $e');
-      }
-    }
-  }
-
-  /// 暂停所有控制器
-  Future<void> _pauseAllControllers() async {
-    final controllers =
-        List<VideoPlayerController>.from(_controllerCache.values);
-    for (final controller in controllers) {
-      try {
-        if (controller.value.isInitialized && controller.value.isPlaying) {
-          await controller.pause();
-        }
-      } catch (e) {
-        debugPrint('Error pausing video: $e');
       }
     }
   }
