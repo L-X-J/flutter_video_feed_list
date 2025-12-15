@@ -1,8 +1,9 @@
 import 'dart:async';
-import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
+
 import 'package:extended_image/extended_image.dart';
-import 'services/feed_session_manager.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_video_feed_list/flutter_video_feed_list.dart';
+import 'package:video_player/video_player.dart';
 
 /// 单条视频播放组件
 ///
@@ -13,6 +14,7 @@ class VideoPlayerTile extends StatefulWidget {
     required this.controller,
     required this.videoId,
     required this.coverUrl,
+    this.coverFit,
     required this.viewportSize,
     this.bizWidgets,
     this.groupId,
@@ -28,6 +30,8 @@ class VideoPlayerTile extends StatefulWidget {
 
   /// 视频封面图片地址
   final String coverUrl;
+
+  final BoxFit? coverFit;
 
   /// 父容器的可用区域尺寸（用于封面与叠层布局）
   final Size viewportSize;
@@ -257,122 +261,119 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       });
     }
 
-    return ClipRect(
-      child: SizedBox.expand(
-        child: Stack(
-          children: [
-            // 封面
-            Positioned.fill(
-              child: AnimatedOpacity(
-                opacity: coverOpacity,
-                duration: const Duration(milliseconds: 200),
-                child: Builder(builder: (context) {
-                  final dpr = MediaQuery.of(context).devicePixelRatio;
-                  final cacheWidth = (widget.viewportSize.width * dpr).round();
-                  final cacheHeight =
-                      (widget.viewportSize.height * dpr).round();
-                  return ExtendedImage.network(
-                    widget.coverUrl,
-                    fit: BoxFit.cover,
-                    filterQuality: FilterQuality.low,
-                    cache: true,
-                    clearMemoryCacheWhenDispose: true,
-                    cacheWidth: cacheWidth,
-                    cacheHeight: cacheHeight,
-                  );
-                }),
-              ),
-            ),
-            // 视频
-            Positioned.fill(
-              child: InkWell(
-                onTap: () {
-                  if (controller == null) return;
-                  final c = controller;
-                  bool canUse = false;
-                  try {
-                    canUse = c.value.isInitialized && !c.value.hasError;
-                  } catch (_) {
-                    canUse = false;
-                  }
-                  if (!canUse) return;
-
-                  final wasPlaying = c.value.isPlaying;
-                  if (wasPlaying) {
-                    // 立即更新状态，避免显示延迟
-                    setState(() {
-                      _isPlaying = false;
-                    });
-                    c.pause().then((_) {
-                      if (mounted) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => mounted ? setState(() {}) : null);
-                      }
-                    }).catchError((Object e) {
-                      debugPrint('Error pausing video: $e');
-                    });
-                  } else {
-                    // 立即更新状态，避免显示延迟
-                    setState(() {
-                      _isPlaying = true;
-                    });
-                    VideoFeedSessionManager.instance
-                        .playExclusive(widget.groupId ?? '', c)
-                        .then((_) {
-                      if (mounted) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => mounted ? setState(() {}) : null);
-                      }
-                    }).catchError((Object e) {
-                      debugPrint('Error playing video: $e');
-                    });
-                  }
-                },
-                child: FittedBox(
-                  key: _playerKey,
-                  fit: BoxFit.cover,
-                  alignment: Alignment.center,
-                  child: SizedBox(
-                    width: baseSize.width,
-                    height: baseSize.height,
-                    child: !showCover
-                        ? VideoPlayer(controller)
-                        : const SizedBox.shrink(),
-                  ),
+    return Stack(
+      children: [
+        // 封面
+        Positioned.fill(
+          child: AnimatedOpacity(
+            opacity: coverOpacity,
+            duration: const Duration(milliseconds: 200),
+            child: Builder(builder: (context) {
+              final dpr = MediaQuery.of(context).devicePixelRatio;
+              final cacheWidth = (widget.viewportSize.width * dpr).round();
+              final cacheHeight = (widget.viewportSize.height * dpr).round();
+              return SizedBox(
+                width: baseSize.width,
+                height: baseSize.height,
+                child: ExtendedImage.network(
+                  widget.coverUrl,
+                  fit: widget.coverFit ?? BoxFit.fitHeight,
+                  filterQuality: FilterQuality.low,
+                  cache: true,
+                  clearMemoryCacheWhenDispose: true,
+                  // cacheWidth: (cacheWidth / 2).round(),
+                  // cacheHeight: (cacheHeight / 2).round(),
                 ),
-              ),
-            ),
-
-            if (showCover &&
-                widget.isCurrent &&
-                !hasError &&
-                _coverLoadingVisible)
-              const Positioned.fill(
-                child: IgnorePointer(
-                  child: Center(
-                    child: SizedBox(
-                      width: 28,
-                      height: 28,
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 2.5),
-                    ),
-                  ),
-                ),
-              ),
-
-            if (controller != null) ..._buildOverlays(context, controller),
-            if (widget.bizWidgets != null)
-              AnimatedOpacity(
-                opacity: (_bizReady && !showCover) ? 1.0 : 0.0,
-                duration: const Duration(milliseconds: 120),
-                child: IgnorePointer(
-                  ignoring: !(_bizReady && !showCover),
-                  child: Stack(children: widget.bizWidgets!),
-                ),
-              ),
-          ],
+              );
+            }),
+          ),
         ),
-      ),
+
+        // 视频
+        Positioned.fill(
+          child: InkWell(
+            onTap: () {
+              if (controller == null) return;
+              final c = controller;
+              bool canUse = false;
+              try {
+                canUse = c.value.isInitialized && !c.value.hasError;
+              } catch (_) {
+                canUse = false;
+              }
+              if (!canUse) return;
+
+              final wasPlaying = c.value.isPlaying;
+              if (wasPlaying) {
+                // 立即更新状态，避免显示延迟
+                setState(() {
+                  _isPlaying = false;
+                });
+                c.pause().then((_) {
+                  if (mounted) {
+                    WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => mounted ? setState(() {}) : null);
+                  }
+                }).catchError((Object e) {
+                  debugPrint('Error pausing video: $e');
+                });
+              } else {
+                // 立即更新状态，避免显示延迟
+                setState(() {
+                  _isPlaying = true;
+                });
+                VideoFeedSessionManager.instance
+                    .playExclusive(widget.groupId ?? '', c)
+                    .then((_) {
+                  if (mounted) {
+                    WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => mounted ? setState(() {}) : null);
+                  }
+                }).catchError((Object e) {
+                  debugPrint('Error playing video: $e');
+                });
+              }
+            },
+            child: FittedBox(
+              key: _playerKey,
+              fit: BoxFit.cover,
+              alignment: Alignment.center,
+              child: SizedBox(
+                width: baseSize.width,
+                height: baseSize.height,
+                child: !showCover
+                    ? VideoPlayer(controller)
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+
+        if (showCover && widget.isCurrent && !hasError && _coverLoadingVisible)
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(
+                      color: Colors.white, strokeWidth: 2.5),
+                ),
+              ),
+            ),
+          ),
+
+        if (controller != null) ..._buildOverlays(context, controller),
+        if (widget.bizWidgets != null)
+          AnimatedOpacity(
+            opacity: (_bizReady && !showCover) ? 1.0 : 0.0,
+            duration: const Duration(milliseconds: 120),
+            child: IgnorePointer(
+              ignoring: !(_bizReady && !showCover),
+              child: Stack(children: widget.bizWidgets!),
+            ),
+          ),
+      ],
     );
   }
 

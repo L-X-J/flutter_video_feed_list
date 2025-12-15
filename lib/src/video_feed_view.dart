@@ -1,22 +1,22 @@
-import 'dart:io' show File, Platform;
 import 'dart:async';
-import 'package:flutter/foundation.dart';
+import 'dart:io' show Platform;
+
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:preload_page_view/preload_page_view.dart';
 import 'package:video_player/video_player.dart';
-import 'package:device_info_plus/device_info_plus.dart';
 
-import 'models/video_item.dart';
-import 'video_player_tile.dart';
-import 'services/window_manager.dart';
-import 'utils/logging.dart';
 import 'enums/eviction_policy.dart';
-import 'services/volume_manager.dart';
+import 'models/video_item.dart';
 import 'services/feed_session_manager.dart';
-import 'package:extended_image/extended_image.dart';
+import 'services/volume_manager.dart';
+import 'services/window_manager.dart';
+import 'services/controller_factory.dart';
+import 'utils/logging.dart';
+import 'video_player_tile.dart';
 
 /// 视频信息流外部控制器
 ///
@@ -128,8 +128,9 @@ class VideoFeedViewController {
     if (s == null) return;
     s._autoplayEnabled = enabled;
     if (!enabled) return;
-    if (s.widget.items.isEmpty || s._currentIndex >= s.widget.items.length)
+    if (s.widget.items.isEmpty || s._currentIndex >= s.widget.items.length) {
       return;
+    }
     final item = s.widget.items[s._currentIndex];
     await s._getOrCreateController(item);
     final c = s._controllerCache[item.key];
@@ -188,6 +189,7 @@ class VideoFeedView extends StatefulWidget {
     this.emptyBuilder,
     this.playThreshold = 0.8,
     this.allowUserScroll = true,
+    this.coverFit,
     super.key,
   });
 
@@ -196,6 +198,8 @@ class VideoFeedView extends StatefulWidget {
 
   /// 初始展示的逻辑索引
   final int initialIndex;
+
+  final BoxFit? coverFit;
 
   /// 是否循环播放当前视频
   final bool loop;
@@ -273,6 +277,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   final List<String> _accessOrder = [];
   final Set<String> _disposingControllers = <String>{};
   final Map<String, Future<VideoPlayerController?>> _creationInFlight = {};
+  late final VideoControllerFactory _controllerFactory;
 
   late final PreloadPageController _pageController;
   int _currentIndex = 0;
@@ -311,6 +316,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _effectiveMaxControllers =
         widget.ecoMode ? widget.maxControllersEco : widget.maxCacheControllers;
     _autoplayEnabled = widget.autoplay;
+    _controllerFactory = VideoControllerFactory(enableLogs: widget.enableLogs);
 
     // Start device check
     _checkDevice().then((_) {
@@ -349,7 +355,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   }
 
   Future<void> _checkDevice() async {
-    if (kIsWeb || !Platform.isAndroid) {
+    if (!Platform.isAndroid) {
       _deviceCheckDone = true;
       return;
     }
@@ -398,6 +404,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     await _disposeAllControllers();
     await _volumeSub?.cancel();
+    await _controllerFactory.dispose();
   }
 
   @override
@@ -462,7 +469,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final key = item.key;
 
     // 如果还没检查完设备信息且在Android上，等待一下
-    if (!kIsWeb && Platform.isAndroid && !_deviceCheckDone) {
+    if (Platform.isAndroid && !_deviceCheckDone) {
       await _checkDevice();
     }
 
@@ -470,110 +477,18 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final VideoViewType effectiveViewType =
         _isHuawei ? VideoViewType.platformView : widget.viewType;
 
-    try {
-      late VideoPlayerController controller;
-
-      if (kIsWeb) {
-        controller = VideoPlayerController.networkUrl(
-          Uri.parse(item.videoUrl),
-          videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: effectiveViewType,
-        );
-      } else {
-        final cacheManager = DefaultCacheManager();
-        final cached = await cacheManager.getFileFromCache(item.videoUrl);
-        final File file =
-            cached?.file ?? await cacheManager.getSingleFile(item.videoUrl);
-        controller = VideoPlayerController.file(
-          file,
-          videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: effectiveViewType,
-        );
-      }
-
-      await controller.initialize();
-      await controller.setLooping(widget.loop);
-      try {
-        await controller.setVolume(VolumeManager.instance.volume);
-      } catch (_) {}
-
-      _controllerCache[key] = controller;
-      VideoFeedSessionManager.instance.register(widget.feedId, controller);
-      _touchController(key);
-      _enforceCacheLimit(maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
-      if (widget.enableLogs) {
-        final s = controller.value.size;
-        debugPrint(
-            'init ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$effectiveViewType');
-      }
-
-      return controller;
-    } catch (e) {
-      // 硬解码路径失败，尝试网络流作为后备（由 ExoPlayer 选择可用的解码方案）
-      try {
-        final controller = VideoPlayerController.networkUrl(
-          Uri.parse(item.videoUrl),
-          videoPlayerOptions: widget.videoPlayerOptions,
-          viewType: effectiveViewType,
-        );
-        await controller.initialize();
-        await controller.setLooping(widget.loop);
-        try {
-          await controller.setVolume(VolumeManager.instance.volume);
-        } catch (_) {}
-        _controllerCache[key] = controller;
-        VideoFeedSessionManager.instance.register(widget.feedId, controller);
-        _touchController(key);
-        _enforceCacheLimit(
-            maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
-        if (widget.enableLogs) {
-          final s = controller.value.size;
-          debugPrint(
-              'init(network) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$effectiveViewType');
-        }
-        return controller;
-      } catch (e2) {
-        // 如果前面都失败了，且当前不是 platformView，尝试切换到 platformView (SurfaceView)
-        // 这通常能解决部分华为/海思芯片(OMX.hisi)的硬解码初始化失败问题以及其他 SurfaceTexture 兼容性问题
-        // 如果 effectiveViewType 已经是 platformView 了，那这一步其实是重复的，不过为了稳健性（或者如果之前因为某种原因没用上）再试一次也无妨
-        // 这里的逻辑主要针对非华为设备或者检测失败的情况下的后备
-        if (!kIsWeb && effectiveViewType != VideoViewType.platformView) {
-          try {
-            if (widget.enableLogs) {
-              debugPrint(
-                  'Attempting fallback to platformView for ${item.key} (error: $e2)');
-            }
-            final controller = VideoPlayerController.networkUrl(
-              Uri.parse(item.videoUrl),
-              videoPlayerOptions: widget.videoPlayerOptions,
-              viewType: VideoViewType.platformView,
-            );
-            await controller.initialize();
-            await controller.setLooping(widget.loop);
-            try {
-              await controller.setVolume(VolumeManager.instance.volume);
-            } catch (_) {}
-            _controllerCache[key] = controller;
-            VideoFeedSessionManager.instance
-                .register(widget.feedId, controller);
-            _touchController(key);
-            _enforceCacheLimit(
-                maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
-            if (widget.enableLogs) {
-              final s = controller.value.size;
-              debugPrint(
-                  'init(platformView) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
-            }
-            return controller;
-          } catch (e3) {
-            debugPrint('Controller init failed all fallbacks: $e3');
-            return null;
-          }
-        }
-        debugPrint('Controller init failed both file and network: $e2');
-        return null;
-      }
-    }
+    final controller = await _controllerFactory.createAndInit(
+      item,
+      viewType: effectiveViewType,
+      loop: widget.loop,
+      volume: VolumeManager.instance.volume,
+    );
+    if (controller == null) return null;
+    _controllerCache[key] = controller;
+    VideoFeedSessionManager.instance.register(widget.feedId, controller);
+    _touchController(key);
+    _enforceCacheLimit(maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
+    return controller;
   }
 
   /// 播放指定控制器
@@ -836,6 +751,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
                   controller: safeController,
                   videoId: item.key,
                   coverUrl: item.coverUrl,
+                  coverFit: widget.coverFit,
                   viewportSize: viewportSize,
                   groupId: widget.feedId,
                   isCurrent: isCurrent,
