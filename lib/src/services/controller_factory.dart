@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io' show File;
+
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:flutter_video_feed_list/src/utils/logging.dart';
 import 'package:video_player/video_player.dart';
+
 import '../models/video_item.dart';
 
 /// 控制器工厂：负责按“边播边缓存”的策略创建并初始化 VideoPlayerController
@@ -11,9 +14,8 @@ import '../models/video_item.dart';
 /// - HLS/流媒体（`.m3u8`）不执行整文件缓存，仅网络播放
 /// - 遇到初始化失败时支持切换到 `platformView` 兜底
 class VideoControllerFactory {
-  VideoControllerFactory({required bool enableLogs}) : _enableLogs = enableLogs;
+  VideoControllerFactory();
 
-  final bool _enableLogs;
   final Map<String, StreamSubscription<FileResponse>> _subs = {};
   final Map<String, int> _lastBytes = {};
   final Map<String, DateTime> _lastAt = {};
@@ -48,12 +50,11 @@ class VideoControllerFactory {
       try {
         await controller.setVolume(volume);
       } catch (_) {}
-      if (_enableLogs) {
-        final s = controller.value.size;
-        // ignore: avoid_print
-        print(
-            'init(cache) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
-      }
+      final s = controller.value.size;
+      // ignore: avoid_print
+      logging(
+          'init(cache) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
+
       return controller;
     }
 
@@ -68,51 +69,53 @@ class VideoControllerFactory {
       try {
         await controller.setVolume(volume);
       } catch (_) {}
-      if (_enableLogs) {
-        final s = controller.value.size;
-        // ignore: avoid_print
-        print(
-            'init(network-stream) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
-      }
+      final s = controller.value.size;
+      // ignore: avoid_print
+      logging(
+          'init(network-stream) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
+
       // 后台缓存下载（非 HLS）
       if (!isHls && !_subs.containsKey(item.key)) {
         final stream =
             cacheManager.getFileStream(item.videoUrl, withProgress: true);
-        final sub = stream.listen((resp) {
-          if (resp is DownloadProgress) {
-            final now = DateTime.now();
-            final lastBytes = _lastBytes[item.key];
-            final lastAt = _lastAt[item.key];
-            if (lastBytes != null && lastAt != null) {
-              final deltaBytes = resp.downloaded - lastBytes;
-              final dtMs = now.difference(lastAt).inMilliseconds;
-              if (dtMs > 0 && _enableLogs) {
-                final speed = deltaBytes / (dtMs / 1000.0);
-                final total = resp.totalSize ?? 0;
-                final percent = total > 0
-                    ? ((resp.downloaded * 100.0) / total).toStringAsFixed(1)
-                    : '?.?';
-                // ignore: avoid_print
-                print('cache ${item.key} $percent% ${_fmtBytes(speed)}/s');
+        final sub = stream.listen(
+            (resp) {
+              if (resp is DownloadProgress) {
+                final now = DateTime.now();
+                final lastBytes = _lastBytes[item.key];
+                final lastAt = _lastAt[item.key];
+                if (lastBytes != null && lastAt != null) {
+                  final deltaBytes = resp.downloaded - lastBytes;
+                  final dtMs = now.difference(lastAt).inMilliseconds;
+                  if (dtMs > 0) {
+                    final speed = deltaBytes / (dtMs / 1000.0);
+                    final total = resp.totalSize ?? 0;
+                    final percent = total > 0
+                        ? ((resp.downloaded * 100.0) / total).toStringAsFixed(1)
+                        : '?.?';
+                    // ignore: avoid_print
+                    logging(
+                        'cache ${item.key} $percent% ${_fmtBytes(speed)}/s');
+                  }
+                }
+                _lastBytes[item.key] = resp.downloaded;
+                _lastAt[item.key] = now;
+              } else if (resp is FileInfo) {
+                try {
+                  final sz = resp.file.lengthSync();
+                  // ignore: avoid_print
+                  logging('cache ${item.key} done ${_fmtBytes(sz)}');
+                } catch (_) {
+                  // ignore: avoid_print
+                  logging('cache ${item.key} done');
+                }
               }
-            }
-            _lastBytes[item.key] = resp.downloaded;
-            _lastAt[item.key] = now;
-          } else if (resp is FileInfo) {
-            if (_enableLogs) {
-              try {
-                final sz = resp.file.lengthSync();
-                // ignore: avoid_print
-                print('cache ${item.key} done ${_fmtBytes(sz)}');
-              } catch (_) {
-                // ignore: avoid_print
-                print('cache ${item.key} done');
-              }
-            }
-          }
-        }, onError: (_) {}, onDone: () {
-          _cleanup(item.key);
-        }, cancelOnError: true);
+            },
+            onError: (_) {},
+            onDone: () {
+              _cleanup(item.key);
+            },
+            cancelOnError: true);
         _subs[item.key] = sub;
       }
       return controller;
@@ -129,21 +132,20 @@ class VideoControllerFactory {
           try {
             await controller.setVolume(volume);
           } catch (_) {}
-          if (_enableLogs) {
-            final s = controller.value.size;
-            // ignore: avoid_print
-            print(
-                'init(platformView) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
-          }
+          final s = controller.value.size;
+          // ignore: avoid_print
+          logging(
+              'init(platformView) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
+
           return controller;
         } catch (e3) {
           // ignore: avoid_print
-          print('Controller init failed all fallbacks: $e3');
+          logging('Controller init failed all fallbacks: $e3');
           return null;
         }
       }
       // ignore: avoid_print
-      print('Controller init failed in network stream: $e');
+      logging('Controller init failed in network stream: $e');
       return null;
     }
   }

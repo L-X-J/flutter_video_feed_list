@@ -11,10 +11,10 @@ import 'package:video_player/video_player.dart';
 
 import 'enums/eviction_policy.dart';
 import 'models/video_item.dart';
+import 'services/controller_factory.dart';
 import 'services/feed_session_manager.dart';
 import 'services/volume_manager.dart';
 import 'services/window_manager.dart';
-import 'services/controller_factory.dart';
 import 'utils/logging.dart';
 import 'video_player_tile.dart';
 
@@ -33,6 +33,7 @@ import 'video_player_tile.dart';
 class VideoFeedViewController {
   _VideoFeedViewState? _state;
   bool? _pendingAutoplay;
+
   void _bind(_VideoFeedViewState s) {
     _state = s;
     if (_pendingAutoplay != null) {
@@ -162,7 +163,7 @@ typedef IndexChanged = void Function(int index);
 /// - 支持上下滑动翻页、懒加载控制器与自适应窗口保留
 /// - 提供“滑到即播”的体验与低内存运行策略
 class VideoFeedView extends StatefulWidget {
-  const VideoFeedView({
+  VideoFeedView({
     required this.feedId,
     required this.items,
     this.controller,
@@ -178,7 +179,6 @@ class VideoFeedView extends StatefulWidget {
     this.showControllerOnlyOnCurrentPage = true,
     this.onIndexChanged,
     this.aggressiveOnFastScroll = true,
-    this.enableLogs = false,
     this.evictionPolicy = EvictionPolicy.lru,
     this.ecoMode = false,
     this.maxControllersEco = 1,
@@ -190,8 +190,13 @@ class VideoFeedView extends StatefulWidget {
     this.playThreshold = 0.8,
     this.allowUserScroll = true,
     this.coverFit,
+    LogFunction? logF,
     super.key,
-  });
+  }) {
+    if (logF != null) {
+      logFunction = logF;
+    }
+  }
 
   /// 数据源列表（每个条目包含视频与封面）
   final List<IVideoItem> items;
@@ -230,9 +235,6 @@ class VideoFeedView extends StatefulWidget {
 
   /// 快滑时是否激进清理，仅保留当前页控制器
   final bool aggressiveOnFastScroll;
-
-  /// 是否开启诊断日志输出
-  final bool enableLogs;
 
   /// 控制器驱逐策略（LRU/FIFO）
   final EvictionPolicy evictionPolicy;
@@ -316,7 +318,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _effectiveMaxControllers =
         widget.ecoMode ? widget.maxControllersEco : widget.maxCacheControllers;
     _autoplayEnabled = widget.autoplay;
-    _controllerFactory = VideoControllerFactory(enableLogs: widget.enableLogs);
+    _controllerFactory = VideoControllerFactory();
 
     // Start device check
     _checkDevice().then((_) {
@@ -368,7 +370,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         _isHuawei = true;
       }
     } catch (e) {
-      debugPrint('Device info check failed: $e');
+      logging('Device info check failed: $e');
     } finally {
       _deviceCheckDone = true;
     }
@@ -502,7 +504,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
             .playExclusive(widget.feedId, controller);
         if (mounted) setState(() {});
       } catch (e) {
-        debugPrint('Error playing video: $e');
+        logging('Error playing video: $e');
       }
     }
   }
@@ -529,7 +531,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         try {
           await controller.dispose();
         } catch (e) {
-          debugPrint('Error disposing controller: $e');
+          logging('Error disposing controller: $e');
         }
       }
     } finally {
@@ -559,10 +561,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
           : _controllerCache.keys.first;
     }
     _removeController(evictKey);
-    if (widget.enableLogs) {
-      debugPrint(
-          'evict $evictKey policy=$policy size=${_controllerCache.length}');
-    }
+    logging('evict $evictKey policy=$policy size=${_controllerCache.length}');
   }
 
   /// 释放所有控制器
@@ -598,7 +597,6 @@ class _VideoFeedViewState extends State<VideoFeedView>
       controllerCache: _controllerCache,
       removeController: _removeController,
       getOrCreateController: _getOrCreateController,
-      enableLogs: widget.enableLogs,
     );
   }
 
@@ -645,7 +643,6 @@ class _VideoFeedViewState extends State<VideoFeedView>
           controllerCache: _controllerCache,
           removeController: _removeController,
           getOrCreateController: _getOrCreateController,
-          enableLogs: widget.enableLogs,
         );
       }
 
@@ -653,10 +650,10 @@ class _VideoFeedViewState extends State<VideoFeedView>
       if (_autoplayEnabled) await _playController(currentKey);
       if (mounted) setState(() {});
       widget.onIndexChanged?.call(_currentIndex);
-      logIf(widget.enableLogs,
+      logging(
           'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}');
     } catch (e) {
-      debugPrint('Error handling page change: $e');
+      logging('Error handling page change: $e');
     }
   }
 

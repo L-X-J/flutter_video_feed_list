@@ -115,8 +115,6 @@ class _VideoFeedDemoPageState extends State<VideoFeedDemoPage> {
           settleDelayMs: 10,
           showControllerOnlyOnCurrentPage: true,
           aggressiveOnFastScroll: true,
-          // viewType: VideoViewType.platformView,
-          enableLogs: true,
         ),
       ),
     );

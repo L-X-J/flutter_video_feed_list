@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_video_feed_list/flutter_video_feed_list.dart';
+import 'package:flutter_video_feed_list/src/utils/logging.dart';
 import 'package:video_player/video_player.dart';
 
 /// 单条视频播放组件
@@ -315,7 +316,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                         (_) => mounted ? setState(() {}) : null);
                   }
                 }).catchError((Object e) {
-                  debugPrint('Error pausing video: $e');
+                  logging('Error pausing video: $e');
                 });
               } else {
                 // 立即更新状态，避免显示延迟
@@ -330,7 +331,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                         (_) => mounted ? setState(() {}) : null);
                   }
                 }).catchError((Object e) {
-                  debugPrint('Error playing video: $e');
+                  logging('Error playing video: $e');
                 });
               }
             },

@@ -1,5 +1,7 @@
 import 'package:video_player/video_player.dart';
+
 import '../models/video_item.dart';
+import '../utils/logging.dart';
 
 /// 窗口控制：在当前索引附近保留有限数量的控制器
 ///
@@ -18,7 +20,6 @@ Future<void> manageControllerWindow({
   required Future<void> Function(String key) removeController,
   required Future<VideoPlayerController?> Function(IVideoItem item)
       getOrCreateController,
-  bool enableLogs = false,
 }) async {
   if (items.isEmpty) return;
   final keysToKeep = <String>{};
@@ -66,8 +67,5 @@ Future<void> manageControllerWindow({
   for (final idx in remainingIndices) {
     await getOrCreateController(items[idx]);
   }
-  if (enableLogs) {
-    // ignore: avoid_print
-    print('window keep=${keysToKeep.length} active=${controllerCache.length}');
-  }
+  logging('window keep=${keysToKeep.length} active=${controllerCache.length}');
 }
