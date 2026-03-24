@@ -8,6 +8,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:preload_page_view/preload_page_view.dart';
 import 'package:video_player/video_player.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 import 'enums/eviction_policy.dart';
 import 'models/video_item.dart';
@@ -83,7 +84,7 @@ class VideoFeedViewController {
   Future<void> resumeThisFeed() async {
     final s = _state;
     if (s == null) return;
-    await VideoFeedSessionManager.instance.resumeGroup(s.widget.feedId);
+    await s._resumeCurrentIfAllowed();
     // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
   }
@@ -110,8 +111,14 @@ class VideoFeedViewController {
   }
 
   Future<void> resumeAll() async {
-    await VideoFeedSessionManager.instance.resumeAll();
     final s = _state;
+    if (s != null) {
+      await s._resumeCurrentIfAllowed();
+      // ignore: invalid_use_of_protected_member
+      if (s.mounted) s.setState(() {});
+      return;
+    }
+    await VideoFeedSessionManager.instance.resumeAll();
     // ignore: invalid_use_of_protected_member
     if (s != null && s.mounted) s.setState(() {});
   }
@@ -128,28 +135,11 @@ class VideoFeedViewController {
     _pendingAutoplay = enabled;
     if (s == null) return;
     s._autoplayEnabled = enabled;
-    if (!enabled) return;
-    if (s.widget.items.isEmpty || s._currentIndex >= s.widget.items.length) {
+    if (!enabled) {
+      await s._pauseFeedForInvisibility();
       return;
     }
-    final item = s.widget.items[s._currentIndex];
-    await s._getOrCreateController(item);
-    final c = s._controllerCache[item.key];
-    if (c != null) {
-      bool canPlay = false;
-      try {
-        canPlay =
-            c.value.isInitialized && !c.value.hasError && !c.value.isPlaying;
-      } catch (_) {
-        canPlay = false;
-      }
-      if (canPlay) {
-        await VideoFeedSessionManager.instance
-            .playExclusive(s.widget.feedId, c);
-        // ignore: invalid_use_of_protected_member
-        if (s.mounted) s.setState(() {});
-      }
-    }
+    await s._resumeCurrentIfAllowed();
   }
 }
 
@@ -296,6 +286,19 @@ class _VideoFeedViewState extends State<VideoFeedView>
   bool _autoplayEnabled = true;
   bool _isHuawei = false;
   bool _deviceCheckDone = false;
+  bool _isAppForeground = true;
+  double _visibleFraction = 1.0;
+
+  /// 当前 feed 是否允许真正发起播放。
+  ///
+  /// 这里把自动播放开关、App 前后台和组件实际可见性统一纳入判断，
+  /// 避免异步初始化、缓冲完成或外部 resume 在页面不可见时把视频重新播起来。
+  bool get _canStartPlayback =>
+      _autoplayEnabled &&
+      _isAppForeground &&
+      _visibleFraction > 0.01 &&
+      !_released &&
+      !_tearingDown;
 
   @override
   void initState() {
@@ -344,8 +347,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
       );
     });
     _volumeSub = VolumeManager.instance.stream.listen((vol) async {
-      final controllers =
-          List<VideoPlayerController>.from(_controllerCache.values);
+      final controllers = List<VideoPlayerController>.from(
+        _controllerCache.values,
+      );
       for (final c in controllers) {
         try {
           if (c.value.isInitialized) {
@@ -417,13 +421,78 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  // 应用生命周期相关逻辑交由业务层处理
+  @override
+
+  /// 当 App 前后台切换时，自动同步当前 feed 的播放许可。
+  ///
+  /// 只要应用不在前台，就立即暂停当前 feed；
+  /// 回到前台后再根据组件可见性决定是否恢复当前条目。
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isAppForeground = state == AppLifecycleState.resumed;
+    if (_canStartPlayback) {
+      unawaited(_resumeCurrentIfAllowed());
+    } else {
+      unawaited(_pauseFeedForInvisibility());
+    }
+  }
+
+  /// 处理 feed 自身可见性变化。
+  ///
+  /// 当页面被新路由盖住时，`visibleFraction` 会降到接近 0，此时必须立刻暂停；
+  /// 页面重新回到前台后，再由当前索引恢复应播放的控制器。
+  void _handleVisibilityChanged(VisibilityInfo info) {
+    final bool wasVisible = _visibleFraction > 0.01;
+    _visibleFraction = info.visibleFraction;
+    final bool isVisible = _visibleFraction > 0.01;
+    if (wasVisible == isVisible) {
+      return;
+    }
+    if (_canStartPlayback) {
+      unawaited(_resumeCurrentIfAllowed());
+    } else {
+      unawaited(_pauseFeedForInvisibility());
+    }
+  }
+
+  /// 因组件不可见而暂停当前 feed。
+  ///
+  /// 这里不会修改 autoplay 开关，只是把已经在排队或正在缓冲的播放请求压回暂停态。
+  Future<void> _pauseFeedForInvisibility() async {
+    await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  /// 在允许播放时恢复当前索引对应的视频。
+  ///
+  /// 调用方无需关心控制器是否已经创建完成；该方法会先补齐当前控制器，
+  /// 再次确认可播放条件仍成立后，才真正发起 `play()`。
+  Future<void> _resumeCurrentIfAllowed() async {
+    if (!_canStartPlayback ||
+        widget.items.isEmpty ||
+        _currentIndex >= widget.items.length) {
+      return;
+    }
+    final item = widget.items[_currentIndex];
+    await _getOrCreateController(item);
+    final controller = _controllerCache[item.key];
+    VideoFeedSessionManager.instance.setCurrent(widget.feedId, controller);
+    if (!_canStartPlayback) {
+      await _pauseFeedForInvisibility();
+      return;
+    }
+    await _playController(item.key);
+    if (mounted) {
+      setState(() {});
+    }
+  }
 
   Future<void> _initAndPlayVideo(int index) async {
     if (widget.items.isEmpty || index >= widget.items.length) return;
     final item = widget.items[index];
     await _getOrCreateController(item);
-    if (_autoplayEnabled) {
+    if (_canStartPlayback) {
       await _playController(item.key);
     }
     final c = _controllerCache[item.key];
@@ -496,12 +565,22 @@ class _VideoFeedViewState extends State<VideoFeedView>
   /// 播放指定控制器
   Future<void> _playController(String key) async {
     final controller = _controllerCache[key];
+    if (!_canStartPlayback) {
+      await _pauseFeedForInvisibility();
+      return;
+    }
     if (controller != null &&
         controller.value.isInitialized &&
         !controller.value.isPlaying) {
       try {
-        await VideoFeedSessionManager.instance
-            .playExclusive(widget.feedId, controller);
+        await VideoFeedSessionManager.instance.playExclusive(
+          widget.feedId,
+          controller,
+        );
+        if (!_canStartPlayback) {
+          await _pauseFeedForInvisibility();
+          return;
+        }
         if (mounted) setState(() {});
       } catch (e) {
         logging('Error playing video: $e');
@@ -647,11 +726,12 @@ class _VideoFeedViewState extends State<VideoFeedView>
       }
 
       await _getOrCreateController(currentItem);
-      if (_autoplayEnabled) await _playController(currentKey);
+      if (_canStartPlayback) await _playController(currentKey);
       if (mounted) setState(() {});
       widget.onIndexChanged?.call(_currentIndex);
       logging(
-          'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}');
+        'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}',
+      );
     } catch (e) {
       logging('Error handling page change: $e');
     }
@@ -699,11 +779,13 @@ class _VideoFeedViewState extends State<VideoFeedView>
     } else if (n is ScrollEndNotification ||
         (n is UserScrollNotification && n.direction == ScrollDirection.idle)) {
       _settleDebounce?.cancel();
-      _settleDebounce =
-          Timer(Duration(milliseconds: widget.settleDelayMs), () async {
-        if (mounted) setState(() => _isScrollSettled = true);
-        await _applyStablePage();
-      });
+      _settleDebounce = Timer(
+        Duration(milliseconds: widget.settleDelayMs),
+        () async {
+          if (mounted) setState(() => _isScrollSettled = true);
+          await _applyStablePage();
+        },
+      );
     }
     return false;
   }
@@ -713,53 +795,62 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.items.isEmpty) {
       return widget.emptyBuilder?.call(context) ?? const SizedBox.shrink();
     }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final Size viewportSize = constraints.biggest;
-        _viewportSize = viewportSize;
-        _devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
-        return NotificationListener<ScrollNotification>(
-          onNotification: _onScrollNotification,
-          child: PreloadPageView.builder(
-            scrollDirection: Axis.vertical,
-            controller: _pageController,
-            itemCount: widget.infiniteScroll
-                ? (widget.items.isEmpty ? 0 : 1000000)
-                : widget.items.length,
-            physics: widget.allowUserScroll
-                ? const AlwaysScrollableScrollPhysics()
-                : const NeverScrollableScrollPhysics(),
-            preloadPagesCount: _effectivePreload,
-            onPageChanged: _handlePageChange,
-            itemBuilder: (context, index) {
-              final logicalIndex =
-                  widget.items.isEmpty ? 0 : index % widget.items.length;
-              final item = widget.items[logicalIndex];
-              final controller = _controllerCache[item.key];
-              // 滑动中只显示封面；稳态时仅当前页渲染控制器（可配置）。正在释放的控制器也传递 null。
-              final isCurrent = logicalIndex == _currentIndex;
-              final shouldShowController =
-                  (widget.showControllerOnlyOnCurrentPage ? isCurrent : true) &&
-                      !_disposingControllers.contains(item.key);
-              final safeController = shouldShowController ? controller : null;
-              return RepaintBoundary(
-                key: ValueKey('${item.key}#$index'),
-                child: VideoPlayerTile(
-                  controller: safeController,
-                  videoId: item.key,
-                  coverUrl: item.coverUrl,
-                  coverFit: widget.coverFit,
-                  viewportSize: viewportSize,
-                  groupId: widget.feedId,
-                  isCurrent: isCurrent,
-                  bizWidgets: widget.bizWidgetsBuilder
-                      ?.call(context, item, logicalIndex),
-                ),
-              );
-            },
-          ),
-        );
-      },
+    return VisibilityDetector(
+      key: ValueKey<String>('video-feed-${widget.feedId}'),
+      onVisibilityChanged: _handleVisibilityChanged,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final Size viewportSize = constraints.biggest;
+          _viewportSize = viewportSize;
+          _devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
+          return NotificationListener<ScrollNotification>(
+            onNotification: _onScrollNotification,
+            child: PreloadPageView.builder(
+              scrollDirection: Axis.vertical,
+              controller: _pageController,
+              itemCount: widget.infiniteScroll
+                  ? (widget.items.isEmpty ? 0 : 1000000)
+                  : widget.items.length,
+              physics: widget.allowUserScroll
+                  ? const AlwaysScrollableScrollPhysics()
+                  : const NeverScrollableScrollPhysics(),
+              preloadPagesCount: _effectivePreload,
+              onPageChanged: _handlePageChange,
+              itemBuilder: (context, index) {
+                final logicalIndex =
+                    widget.items.isEmpty ? 0 : index % widget.items.length;
+                final item = widget.items[logicalIndex];
+                final controller = _controllerCache[item.key];
+                // 滑动中只显示封面；稳态时仅当前页渲染控制器（可配置）。正在释放的控制器也传递 null。
+                final isCurrent = logicalIndex == _currentIndex;
+                final shouldShowController =
+                    (widget.showControllerOnlyOnCurrentPage
+                            ? isCurrent
+                            : true) &&
+                        !_disposingControllers.contains(item.key);
+                final safeController = shouldShowController ? controller : null;
+                return RepaintBoundary(
+                  key: ValueKey('${item.key}#$index'),
+                  child: VideoPlayerTile(
+                    controller: safeController,
+                    videoId: item.key,
+                    coverUrl: item.coverUrl,
+                    coverFit: widget.coverFit,
+                    viewportSize: viewportSize,
+                    groupId: widget.feedId,
+                    isCurrent: isCurrent,
+                    bizWidgets: widget.bizWidgetsBuilder?.call(
+                      context,
+                      item,
+                      logicalIndex,
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -782,9 +873,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
         width: cacheWidth,
         height: cacheHeight,
       );
-      futures.add(precacheImage(provider, context).then((_) {
-        _preloadedCovers.add(item.coverUrl);
-      }).catchError((_) {}));
+      futures.add(
+        precacheImage(provider, context).then((_) {
+          _preloadedCovers.add(item.coverUrl);
+        }).catchError((_) {}),
+      );
     }
     if (futures.isNotEmpty) {
       await Future.wait(futures);
