@@ -59,6 +59,19 @@ void main() {
       expect(decision.alignment, Alignment.center);
     });
 
+    test('接近 3比4 的竖版视频回退为完整展示居中', () {
+      final decision = resolveVideoLayout(
+        displayMode: VideoDisplayMode.adaptive,
+        viewportSize: const Size(390, 844),
+        videoSize: const Size(720, 956),
+      );
+
+      expect(decision.videoFit, BoxFit.contain);
+      expect(decision.coverFit, BoxFit.contain);
+      expect(decision.alignment, Alignment.center);
+      expect(decision.mediaInsets, EdgeInsets.zero);
+    });
+
     test('正方形视频在 adaptive 模式下完整展示并居中', () {
       final decision = resolveVideoLayout(
         displayMode: VideoDisplayMode.adaptive,

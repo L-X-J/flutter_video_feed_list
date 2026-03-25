@@ -101,7 +101,11 @@ VideoLayoutDecision resolveVideoLayout({
 /// 规则以“完整展示优先，9:16 竖版贴顶优先”为目标：
 /// - 横屏、方形、3:4 等非 9:16 竖版素材统一使用 `contain + center`；
 /// - 仅当视频宽高比接近 9:16，且按宽度铺满后不会超出视口高度时，
-///   才在窄屏手机上采用“顶部贴顶 + 轻微横向裁切”的舞台布局：
+///   才在窄屏手机上采用“顶部贴顶 + 轻微横向裁切”的舞台布局；
+/// - 如果为了贴近底部业务区而需要明显放大，导致横向裁切超过阈值，
+///   则回退为 `contain + center`，避免把接近 3:4 的竖版视频硬撑成 9:16 效果。
+///
+/// 这里的“轻微裁切”本质上是业务可接受的轻度放大，并不是任意比例都允许被顶满。
 ///   视频不会一直铺到屏幕底部，而是给底部业务信息留出一小段稳定空间。
 VideoLayoutDecision _resolveAdaptiveVideoLayout({
   required Size viewportSize,
@@ -120,13 +124,26 @@ VideoLayoutDecision _resolveAdaptiveVideoLayout({
             fitWidthHeight: fitWidthHeight,
           )
         : 0;
-    return VideoLayoutDecision(
-      videoFit: portraitBottomInset > 0 ? BoxFit.cover : BoxFit.fitWidth,
-      coverFit: portraitBottomInset > 0 ? BoxFit.cover : BoxFit.fitWidth,
-      alignment:
-          preferTopAlignedPortrait ? Alignment.topCenter : Alignment.center,
-      mediaInsets: EdgeInsets.only(bottom: portraitBottomInset),
-    );
+    final double targetStageHeight = viewportSize.height - portraitBottomInset;
+    final double stagedWidth = targetStageHeight * aspectRatio;
+    final double horizontalOverfillRatio =
+        viewportSize.width <= 0 ? 1 : stagedWidth / viewportSize.width;
+
+    // 允许适度放大，让 9:16 素材更贴近底部业务区；但一旦横向裁切过重，
+    // 画面会呈现明显“被拉大”的感觉，此时宁可回退为完整居中，也不要强顶满。
+    const double maxAcceptedHorizontalOverfillRatio = 1.12;
+    final bool canUsePortraitStage = portraitBottomInset > 0 &&
+        horizontalOverfillRatio <= maxAcceptedHorizontalOverfillRatio;
+
+    if (canUsePortraitStage) {
+      return VideoLayoutDecision(
+        videoFit: BoxFit.cover,
+        coverFit: BoxFit.cover,
+        alignment:
+            preferTopAlignedPortrait ? Alignment.topCenter : Alignment.center,
+        mediaInsets: EdgeInsets.only(bottom: portraitBottomInset),
+      );
+    }
   }
 
   return const VideoLayoutDecision(

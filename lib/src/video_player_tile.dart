@@ -211,10 +211,18 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
   /// 解析当前条目用于布局的参考尺寸。
   ///
-  /// 优先级依次为：已初始化的视频尺寸、已解析出的封面尺寸、当前控制器可用尺寸、
-  /// 最后才回退到视口本身。这样能最大限度让封面和视频共用同一套比例参考。
+  /// 优先级依次为：已初始化视频的真实宽高比、已解析出的封面尺寸、当前控制器可用尺寸、
+  /// 最后才回退到视口本身。这样做的原因是：
+  /// - 封面阶段优先保证首帧稳定，不闪不跳；
+  /// - 播放阶段一旦拿到真实视频比例，就必须以视频自身为准，避免把 9:16 封面
+  ///   的布局误套到 3:4 左右的视频上，造成“封面正常、视频被放大”的错觉。
   Size _resolveReferenceSize(VideoPlayerController? controller) {
     if (controller != null) {
+      final Size? controllerAspectSize =
+          _resolveControllerAspectSize(controller);
+      if (controllerAspectSize != null) {
+        return controllerAspectSize;
+      }
       try {
         final Size controllerSize = controller.value.size;
         if (controllerSize.width > 0 &&
@@ -234,6 +242,28 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       return coverImageSize;
     }
     return widget.viewportSize;
+  }
+
+  /// 根据控制器的真实宽高比生成用于布局的参考尺寸。
+  ///
+  /// 某些素材在平台层已经初始化完成，但 `size` 读取时机并不稳定；相比直接使用像素值，
+  /// `aspectRatio` 更适合做布局决策。这里用一个归一化高度生成等比尺寸，让
+  /// `FittedBox` 只关心比例，不依赖具体分辨率。
+  Size? _resolveControllerAspectSize(VideoPlayerController controller) {
+    try {
+      final value = controller.value;
+      if (!value.isInitialized) {
+        return null;
+      }
+      final double aspectRatio = value.aspectRatio;
+      if (!aspectRatio.isFinite || aspectRatio <= 0) {
+        return null;
+      }
+      const double normalizedHeight = 1000;
+      return Size(aspectRatio * normalizedHeight, normalizedHeight);
+    } catch (_) {
+      return null;
+    }
   }
 
   void _onControllerUpdate() {
