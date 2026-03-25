@@ -1,6 +1,7 @@
 library flutter_video_feed_list;
 
 export 'src/models/video_item.dart';
+export 'src/enums/video_display_mode.dart';
 export 'src/video_feed_view.dart' show VideoFeedView, VideoFeedViewController;
 export 'src/services/volume_manager.dart';
 export 'src/services/feed_session_manager.dart';

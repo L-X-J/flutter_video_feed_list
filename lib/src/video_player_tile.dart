@@ -2,20 +2,24 @@ import 'dart:async';
 
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_video_feed_list/flutter_video_feed_list.dart';
-import 'package:flutter_video_feed_list/src/utils/logging.dart';
 import 'package:video_player/video_player.dart';
+
+import 'enums/video_display_mode.dart';
+import 'services/feed_session_manager.dart';
+import 'utils/logging.dart';
+import 'video_layout.dart';
 
 /// 单条视频播放组件
 ///
-/// 承载 `VideoPlayerController` 的渲染与轻量交互，采用 FittedBox Cover 显示，
-/// 保证铺满且不变形；缓冲/错误/暂停等叠层在内部统一管理。
+/// 承载 `VideoPlayerController` 的渲染与轻量交互，并根据 [videoDisplayMode]
+/// 决定视频与封面的铺放方式。缓冲、错误、暂停与业务叠层统一在内部管理。
 class VideoPlayerTile extends StatefulWidget {
   const VideoPlayerTile({
     required this.controller,
     required this.videoId,
     required this.coverUrl,
     this.coverFit,
+    this.videoDisplayMode = VideoDisplayMode.cover,
     required this.viewportSize,
     this.bizWidgets,
     this.groupId,
@@ -32,7 +36,14 @@ class VideoPlayerTile extends StatefulWidget {
   /// 视频封面图片地址
   final String coverUrl;
 
+  /// 封面默认适配方式。
+  ///
+  /// 该参数主要用于兼容历史页面在 `cover` 模式下的占位图表现；
+  /// 自适应与完整展示模式会优先使用内部统一布局决策。
   final BoxFit? coverFit;
+
+  /// 视频展示模式。
+  final VideoDisplayMode videoDisplayMode;
 
   /// 父容器的可用区域尺寸（用于封面与叠层布局）
   final Size viewportSize;
@@ -62,6 +73,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   Timer? _bizDelayTimer;
   bool _lastShowCover = false;
   bool _bizInitApplied = false;
+  Size? _coverImageSize;
+  ImageStream? _coverImageStream;
+  ImageStreamListener? _coverImageListener;
 
   @override
   void initState() {
@@ -77,6 +91,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _overlayFade.forward();
     });
+    _resolveCoverImageSize();
   }
 
   void _addControllerListener() {
@@ -130,6 +145,11 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         });
       }
     }
+
+    if (oldWidget.coverUrl != widget.coverUrl) {
+      _coverImageSize = null;
+      _resolveCoverImageSize();
+    }
     // 保持叠层稳定显示，不在每次更新时重新执行淡入，避免稳态切换时闪烁
   }
 
@@ -142,7 +162,78 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     _oldController = null;
     _overlayFade.dispose();
     _bizDelayTimer?.cancel();
+    _disposeCoverImageStream();
     super.dispose();
+  }
+
+  /// 解析封面图的原始尺寸。
+  ///
+  /// 在视频控制器尚未初始化完成时，播放器还拿不到真实视频宽高。
+  /// 这里提前读取封面图尺寸，作为同一条内容在占位阶段的比例参考，
+  /// 尽量保证“封面怎么展示，视频初始化后也怎么展示”。
+  void _resolveCoverImageSize() {
+    _disposeCoverImageStream();
+    if (widget.coverUrl.isEmpty) {
+      return;
+    }
+    final ImageProvider provider = NetworkImage(widget.coverUrl);
+    final ImageStream stream = provider.resolve(ImageConfiguration.empty);
+    final ImageStreamListener listener = ImageStreamListener((image, _) {
+      final Size nextSize = Size(
+        image.image.width.toDouble(),
+        image.image.height.toDouble(),
+      );
+      if (!mounted || _coverImageSize == nextSize) {
+        return;
+      }
+      setState(() {
+        _coverImageSize = nextSize;
+      });
+    });
+    _coverImageStream = stream;
+    _coverImageListener = listener;
+    stream.addListener(listener);
+  }
+
+  /// 释放封面尺寸监听。
+  ///
+  /// 封面 URL 切换或组件销毁时必须解绑图片流监听，避免旧条目的异步回调串到
+  /// 新视频上，造成封面比例偶发跳变。
+  void _disposeCoverImageStream() {
+    final stream = _coverImageStream;
+    final listener = _coverImageListener;
+    if (stream != null && listener != null) {
+      stream.removeListener(listener);
+    }
+    _coverImageStream = null;
+    _coverImageListener = null;
+  }
+
+  /// 解析当前条目用于布局的参考尺寸。
+  ///
+  /// 优先级依次为：已初始化的视频尺寸、已解析出的封面尺寸、当前控制器可用尺寸、
+  /// 最后才回退到视口本身。这样能最大限度让封面和视频共用同一套比例参考。
+  Size _resolveReferenceSize(VideoPlayerController? controller) {
+    if (controller != null) {
+      try {
+        final Size controllerSize = controller.value.size;
+        if (controllerSize.width > 0 &&
+            controllerSize.height > 0 &&
+            controllerSize.width.isFinite &&
+            controllerSize.height.isFinite) {
+          return controllerSize;
+        }
+      } catch (_) {}
+    }
+    final Size? coverImageSize = _coverImageSize;
+    if (coverImageSize != null &&
+        coverImageSize.width > 0 &&
+        coverImageSize.height > 0 &&
+        coverImageSize.width.isFinite &&
+        coverImageSize.height.isFinite) {
+      return coverImageSize;
+    }
+    return widget.viewportSize;
   }
 
   void _onControllerUpdate() {
@@ -201,12 +292,42 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     }
   }
 
+  /// 在统一的媒体可视区域内渲染子组件。
+  ///
+  /// 9:16 手机竖版素材会给底部业务区预留一段空间。这里把封面、视频和状态叠层
+  /// 都裁剪到同一个区域里，避免各层边界不一致而产生“视频缩了、图标没缩”的错位。
+  Widget _buildMediaViewport({
+    required EdgeInsets mediaInsets,
+    required Widget child,
+  }) {
+    return Positioned.fill(
+      child: Padding(
+        padding: mediaInsets,
+        child: ClipRect(child: child),
+      ),
+    );
+  }
+
+  /// 在媒体可视区域中构建居中的提示层。
+  ///
+  /// 缓冲、错误、暂停图标都应该相对“实际视频区域”居中，而不是相对整屏黑底居中；
+  /// 否则在底部额外留出业务区后，图标会明显偏下。
+  Widget _buildCenteredMediaOverlay({
+    required EdgeInsets mediaInsets,
+    required Widget child,
+  }) {
+    return _buildMediaViewport(
+      mediaInsets: mediaInsets,
+      child: IgnorePointer(child: Center(child: child)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     /// 渲染规则：
-    /// - 控制器未就绪：显示封面与加载指示（StackFit.expand）
-    /// - 控制器就绪：使用 FittedBox(BoxFit.cover) 保证铺满且不变形，
-    ///   并在最上层叠加缓冲/错误/暂停与业务组件
+    /// - 控制器未就绪：显示封面与加载指示；
+    /// - 控制器就绪：按统一布局决策渲染视频；
+    /// - 封面、视频、中间态叠层共用同一块媒体区域，避免自适应模式下层与层错位。
     final controller = widget.controller;
     bool safelyInitialized = false;
     if (controller != null) {
@@ -227,8 +348,14 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     }
     final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
-    final Size baseSize =
-        safelyInitialized ? controller!.value.size : widget.viewportSize;
+    final Size baseSize = _resolveReferenceSize(controller);
+    final VideoLayoutDecision layoutDecision = resolveVideoLayout(
+      displayMode: widget.videoDisplayMode,
+      viewportSize: widget.viewportSize,
+      videoSize: baseSize,
+      fallbackCoverFit: widget.coverFit,
+    );
+    final EdgeInsets mediaInsets = layoutDecision.mediaInsets;
 
     if (showCover != _lastShowCover) {
       _lastShowCover = showCover;
@@ -264,26 +391,31 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
     return Stack(
       children: [
-        // 封面
         Positioned.fill(
+          child: ColoredBox(color: layoutDecision.backgroundColor),
+        ),
+        // 封面
+        _buildMediaViewport(
+          mediaInsets: mediaInsets,
           child: AnimatedOpacity(
             opacity: coverOpacity,
             duration: const Duration(milliseconds: 200),
             child: Builder(builder: (context) {
-              final dpr = MediaQuery.of(context).devicePixelRatio;
-              final cacheWidth = (widget.viewportSize.width * dpr).round();
-              final cacheHeight = (widget.viewportSize.height * dpr).round();
-              return SizedBox(
-                width: baseSize.width,
-                height: baseSize.height,
-                child: ExtendedImage.network(
-                  widget.coverUrl,
-                  fit: widget.coverFit ?? BoxFit.fitHeight,
-                  filterQuality: FilterQuality.low,
-                  cache: true,
-                  clearMemoryCacheWhenDispose: true,
-                  // cacheWidth: (cacheWidth / 2).round(),
-                  // cacheHeight: (cacheHeight / 2).round(),
+              return FittedBox(
+                fit: layoutDecision.coverFit,
+                alignment: layoutDecision.alignment,
+                child: SizedBox(
+                  width: baseSize.width,
+                  height: baseSize.height,
+                  child: ExtendedImage.network(
+                    widget.coverUrl,
+                    fit: BoxFit.fill,
+                    filterQuality: FilterQuality.low,
+                    cache: true,
+                    clearMemoryCacheWhenDispose: true,
+                    // cacheWidth: (cacheWidth / 2).round(),
+                    // cacheHeight: (cacheHeight / 2).round(),
+                  ),
                 ),
               );
             }),
@@ -291,7 +423,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         ),
 
         // 视频
-        Positioned.fill(
+        _buildMediaViewport(
+          mediaInsets: mediaInsets,
           child: InkWell(
             onTap: () {
               if (controller == null) return;
@@ -337,8 +470,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             },
             child: FittedBox(
               key: _playerKey,
-              fit: BoxFit.cover,
-              alignment: Alignment.center,
+              fit: layoutDecision.videoFit,
+              alignment: layoutDecision.alignment,
               child: SizedBox(
                 width: baseSize.width,
                 height: baseSize.height,
@@ -351,20 +484,19 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         ),
 
         if (showCover && widget.isCurrent && !hasError && _coverLoadingVisible)
-          const Positioned.fill(
-            child: IgnorePointer(
-              child: Center(
-                child: SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: CircularProgressIndicator(
-                      color: Colors.white, strokeWidth: 2.5),
-                ),
+          _buildCenteredMediaOverlay(
+            mediaInsets: mediaInsets,
+            child: const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2.5,
               ),
             ),
           ),
 
-        if (controller != null) ..._buildOverlays(context, controller),
+        if (controller != null) ..._buildOverlays(controller, mediaInsets),
         if (widget.bizWidgets != null)
           AnimatedOpacity(
             opacity: (_bizReady && !showCover) ? 1.0 : 0.0,
@@ -378,8 +510,14 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     );
   }
 
+  /// 构建视频状态叠层。
+  ///
+  /// 这些叠层需要和实际媒体区域完全同步，否则 9:16 视频在顶部贴顶、底部留业务区时，
+  /// 缓冲与暂停提示会掉到黑底区域里，影响观感和点击预期。
   List<Widget> _buildOverlays(
-      BuildContext context, VideoPlayerController controller) {
+    VideoPlayerController controller,
+    EdgeInsets mediaInsets,
+  ) {
     // 安全获取控制器状态
     bool hasError = false;
     bool isInitialized = false;
@@ -399,34 +537,34 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     return [
       // 缓冲指示器：优先显示，当正在缓冲时显示
       if (_isBuffering)
-        IgnorePointer(
-          child: Center(
-            child: RotationTransition(
-              turns:
-                  Tween<double>(begin: 0, end: 1).animate(_loadingController),
-              child: const SizedBox(
-                width: 28,
-                height: 28,
-                child: CircularProgressIndicator(
-                    color: Colors.white, strokeWidth: 2.5),
-              ),
+        _buildCenteredMediaOverlay(
+          mediaInsets: mediaInsets,
+          child: RotationTransition(
+            turns: Tween<double>(begin: 0, end: 1).animate(_loadingController),
+            child: const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                  color: Colors.white, strokeWidth: 2.5),
             ),
           ),
         ),
       // 错误指示器：有错误时显示
       if (hasError)
-        const IgnorePointer(
-          child: Center(
-            child: Icon(Icons.error_outline, color: Colors.redAccent, size: 72),
-          ),
+        _buildCenteredMediaOverlay(
+          mediaInsets: mediaInsets,
+          child: const Icon(Icons.error_outline,
+              color: Colors.redAccent, size: 72),
         ),
       // 暂停图标：只在视频暂停、没有缓冲、没有错误时显示
       // 使用 _isPlaying 而不是 controller.value.isPlaying 确保状态同步
       if (!_isPlaying && !_isBuffering && !hasError)
-        const IgnorePointer(
-          child: Center(
-            child:
-                Icon(Icons.pause_circle_filled, color: Colors.white, size: 48),
+        _buildCenteredMediaOverlay(
+          mediaInsets: mediaInsets,
+          child: const Icon(
+            Icons.pause_circle_filled,
+            color: Colors.white,
+            size: 48,
           ),
         ),
     ];

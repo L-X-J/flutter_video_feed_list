@@ -11,6 +11,7 @@ import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import 'enums/eviction_policy.dart';
+import 'enums/video_display_mode.dart';
 import 'models/video_item.dart';
 import 'services/controller_factory.dart';
 import 'services/feed_session_manager.dart';
@@ -180,6 +181,7 @@ class VideoFeedView extends StatefulWidget {
     this.playThreshold = 0.8,
     this.allowUserScroll = true,
     this.coverFit,
+    this.videoDisplayMode = VideoDisplayMode.cover,
     LogFunction? logF,
     super.key,
   }) {
@@ -258,6 +260,13 @@ class VideoFeedView extends StatefulWidget {
 
   final double playThreshold;
   final bool allowUserScroll;
+
+  /// 视频在当前视口中的展示模式。
+  ///
+  /// 默认值保持为 [VideoDisplayMode.cover]，用于兼容既有页面的满屏裁切表现；
+  /// 当业务侧需要“尽量完整展示”，同时希望 9:16 手机竖版素材顶部贴顶、底部为
+  /// 业务信息预留稳定空间时，可以显式传入 `contain` 或 `adaptive`。
+  final VideoDisplayMode videoDisplayMode;
 
   @override
   State<VideoFeedView> createState() => _VideoFeedViewState();
@@ -836,6 +845,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
                     videoId: item.key,
                     coverUrl: item.coverUrl,
                     coverFit: widget.coverFit,
+                    videoDisplayMode: widget.videoDisplayMode,
                     viewportSize: viewportSize,
                     groupId: widget.feedId,
                     isCurrent: isCurrent,
