@@ -77,7 +77,7 @@ class VideoFeedViewController {
   Future<void> pauseThisFeed() async {
     final s = _state;
     if (s == null) return;
-    await VideoFeedSessionManager.instance.pauseGroup(s.widget.feedId);
+    await s._pauseFeedForReason(VideoPlaybackStopReason.manualPause);
     // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
   }
@@ -131,13 +131,25 @@ class VideoFeedViewController {
     _state = null;
   }
 
+  /// 立即结算当前播放段。
+  ///
+  /// 该方法适合在业务页面即将主动切换上下文时兜底调用，避免最后一段播放时长因为
+  /// 页面生命周期切换过快而来不及上报。
+  Future<void> finishCurrentPlaybackSegment({
+    VideoPlaybackStopReason reason = VideoPlaybackStopReason.manualPause,
+  }) async {
+    final s = _state;
+    if (s == null) return;
+    await s._flushActivePlaybackSegment(reason);
+  }
+
   Future<void> setAutoplay(bool enabled) async {
     final s = _state;
     _pendingAutoplay = enabled;
     if (s == null) return;
     s._autoplayEnabled = enabled;
     if (!enabled) {
-      await s._pauseFeedForInvisibility();
+      await s._pauseFeedForReason(VideoPlaybackStopReason.autoplayDisabled);
       return;
     }
     await s._resumeCurrentIfAllowed();
@@ -148,6 +160,73 @@ class VideoFeedViewController {
 ///
 /// 参数为逻辑索引（0..items.length-1）
 typedef IndexChanged = void Function(int index);
+
+/// 播放状态。
+enum VideoPlaybackState {
+  started,
+  paused,
+}
+
+/// 播放状态变化原因。
+enum VideoPlaybackStateChangeReason {
+  playbackStarted,
+  pageChanged,
+  invisible,
+  appLifecycle,
+  manualPause,
+  autoplayDisabled,
+  controllerRemoved,
+  released,
+  disposed,
+}
+
+/// 播放段结束原因。
+enum VideoPlaybackStopReason {
+  pageChanged,
+  invisible,
+  appLifecycle,
+  manualPause,
+  autoplayDisabled,
+  controllerRemoved,
+  released,
+  disposed,
+}
+
+/// 单次播放状态变化事件。
+///
+/// 播放器会在“真正开始播放”和“当前播放段被暂停/打断”两个时机抛出事件，
+/// 业务层可据此记录播放状态、调试日志或做额外埋点。
+class VideoPlaybackStateEvent {
+  const VideoPlaybackStateEvent({
+    required this.item,
+    required this.index,
+    required this.state,
+    required this.reason,
+  });
+
+  final IVideoItem item;
+  final int index;
+  final VideoPlaybackState state;
+  final VideoPlaybackStateChangeReason reason;
+}
+
+/// 单次播放段信息。
+///
+/// 只有在当前播放段累计秒数达到 1 秒时，播放器才会向外抛出该对象，避免业务层
+/// 收到大量不足 1 秒的碎片事件。
+class VideoPlaybackSegment {
+  const VideoPlaybackSegment({
+    required this.item,
+    required this.index,
+    required this.playedDuration,
+    required this.stopReason,
+  });
+
+  final IVideoItem item;
+  final int index;
+  final Duration playedDuration;
+  final VideoPlaybackStopReason stopReason;
+}
 
 /// 视频信息流主组件
 ///
@@ -169,6 +248,8 @@ class VideoFeedView extends StatefulWidget {
     this.imageCacheMaxBytes = 32 * 1024 * 1024,
     this.showControllerOnlyOnCurrentPage = true,
     this.onIndexChanged,
+    this.onPlaybackStateChanged,
+    this.onPlaybackSegment,
     this.aggressiveOnFastScroll = true,
     this.evictionPolicy = EvictionPolicy.lru,
     this.ecoMode = false,
@@ -224,6 +305,19 @@ class VideoFeedView extends StatefulWidget {
   final bool showControllerOnlyOnCurrentPage; // 仅在当前页面上渲染控制器以减少纹理内存
   /// 页索引变化回调
   final IndexChanged? onIndexChanged;
+
+  /// 播放状态变化回调。
+  ///
+  /// 该回调用于通知业务层某条视频已经真正进入播放态，或因切页/离场/暂停而退出
+  /// 当前播放段。
+  final FutureOr<void> Function(VideoPlaybackStateEvent event)?
+      onPlaybackStateChanged;
+
+  /// 当前播放段结算回调。
+  ///
+  /// 只有单段累计播放时长达到 1 秒才会触发，适合用于浏览量上报等按秒结算的业务。
+  final FutureOr<void> Function(VideoPlaybackSegment segment)?
+      onPlaybackSegment;
 
   /// 快滑时是否激进清理，仅保留当前页控制器
   final bool aggressiveOnFastScroll;
@@ -297,6 +391,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
   bool _deviceCheckDone = false;
   bool _isAppForeground = true;
   double _visibleFraction = 1.0;
+  String? _activePlaybackKey;
+  int? _activePlaybackIndex;
+  DateTime? _activePlaybackStartedAt;
 
   /// 当前 feed 是否允许真正发起播放。
   ///
@@ -394,6 +491,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     WidgetsBinding.instance.removeObserver(this);
     _settleDebounce?.cancel();
     _settleDebounce = null;
+    unawaited(_flushActivePlaybackSegment(VideoPlaybackStopReason.disposed));
     VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     _disposeAllControllers();
@@ -403,6 +501,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   @override
   void deactivate() {
+    unawaited(_flushActivePlaybackSegment(VideoPlaybackStopReason.invisible));
     VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     super.deactivate();
   }
@@ -415,6 +514,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     } catch (_) {}
     _settleDebounce?.cancel();
     _settleDebounce = null;
+    await _flushActivePlaybackSegment(VideoPlaybackStopReason.released);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     await _disposeAllControllers();
@@ -441,7 +541,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (_canStartPlayback) {
       unawaited(_resumeCurrentIfAllowed());
     } else {
-      unawaited(_pauseFeedForInvisibility());
+      unawaited(_pauseFeedForReason(VideoPlaybackStopReason.appLifecycle));
     }
   }
 
@@ -459,14 +559,131 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (_canStartPlayback) {
       unawaited(_resumeCurrentIfAllowed());
     } else {
-      unawaited(_pauseFeedForInvisibility());
+      unawaited(_pauseFeedForReason(VideoPlaybackStopReason.invisible));
     }
+  }
+
+  /// 发送播放状态变化事件。
+  void _notifyPlaybackState({
+    required IVideoItem item,
+    required int index,
+    required VideoPlaybackState state,
+    required VideoPlaybackStateChangeReason reason,
+  }) {
+    final callback = widget.onPlaybackStateChanged;
+    if (callback == null) {
+      return;
+    }
+    callback(
+      VideoPlaybackStateEvent(
+        item: item,
+        index: index,
+        state: state,
+        reason: reason,
+      ),
+    );
+  }
+
+  /// 标记当前视频进入真实播放态。
+  ///
+  /// 只有当控制器已经成功调用 `play()` 后，才会开始累计播放时长，避免把预加载、
+  /// 缓冲阶段误算进浏览上报。
+  void _markPlaybackStarted({
+    required IVideoItem item,
+    required int index,
+  }) {
+    final String nextKey = item.key;
+    if (_activePlaybackKey == nextKey && _activePlaybackStartedAt != null) {
+      return;
+    }
+    _activePlaybackKey = nextKey;
+    _activePlaybackIndex = index;
+    _activePlaybackStartedAt = DateTime.now();
+    _notifyPlaybackState(
+      item: item,
+      index: index,
+      state: VideoPlaybackState.started,
+      reason: VideoPlaybackStateChangeReason.playbackStarted,
+    );
+  }
+
+  /// 结算当前播放段并在需要时通知业务层。
+  Future<void> _flushActivePlaybackSegment(
+      VideoPlaybackStopReason reason) async {
+    final String? activeKey = _activePlaybackKey;
+    final DateTime? startedAt = _activePlaybackStartedAt;
+    final int? playbackIndex = _activePlaybackIndex;
+    if (activeKey == null || startedAt == null || playbackIndex == null) {
+      _clearActivePlayback();
+      return;
+    }
+
+    if (playbackIndex < 0 || playbackIndex >= widget.items.length) {
+      _clearActivePlayback();
+      return;
+    }
+
+    final IVideoItem item = widget.items[playbackIndex];
+    if (item.key != activeKey) {
+      _clearActivePlayback();
+      return;
+    }
+
+    final Duration playedDuration = DateTime.now().difference(startedAt);
+    _clearActivePlayback();
+    _notifyPlaybackState(
+      item: item,
+      index: playbackIndex,
+      state: VideoPlaybackState.paused,
+      reason: switch (reason) {
+        VideoPlaybackStopReason.pageChanged =>
+          VideoPlaybackStateChangeReason.pageChanged,
+        VideoPlaybackStopReason.invisible =>
+          VideoPlaybackStateChangeReason.invisible,
+        VideoPlaybackStopReason.appLifecycle =>
+          VideoPlaybackStateChangeReason.appLifecycle,
+        VideoPlaybackStopReason.manualPause =>
+          VideoPlaybackStateChangeReason.manualPause,
+        VideoPlaybackStopReason.autoplayDisabled =>
+          VideoPlaybackStateChangeReason.autoplayDisabled,
+        VideoPlaybackStopReason.controllerRemoved =>
+          VideoPlaybackStateChangeReason.controllerRemoved,
+        VideoPlaybackStopReason.released =>
+          VideoPlaybackStateChangeReason.released,
+        VideoPlaybackStopReason.disposed =>
+          VideoPlaybackStateChangeReason.disposed,
+      },
+    );
+
+    if (playedDuration.inSeconds < 1) {
+      return;
+    }
+    final callback = widget.onPlaybackSegment;
+    if (callback == null) {
+      return;
+    }
+    await callback(
+      VideoPlaybackSegment(
+        item: item,
+        index: playbackIndex,
+        playedDuration: Duration(seconds: playedDuration.inSeconds),
+        stopReason: reason,
+      ),
+    );
+  }
+
+  /// 清空当前播放段状态。
+  void _clearActivePlayback() {
+    _activePlaybackKey = null;
+    _activePlaybackIndex = null;
+    _activePlaybackStartedAt = null;
   }
 
   /// 因组件不可见而暂停当前 feed。
   ///
   /// 这里不会修改 autoplay 开关，只是把已经在排队或正在缓冲的播放请求压回暂停态。
-  Future<void> _pauseFeedForInvisibility() async {
+  Future<void> _pauseFeedForReason(VideoPlaybackStopReason reason) async {
+    await _flushActivePlaybackSegment(reason);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     if (mounted) {
       setState(() {});
@@ -488,7 +705,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final controller = _controllerCache[item.key];
     VideoFeedSessionManager.instance.setCurrent(widget.feedId, controller);
     if (!_canStartPlayback) {
-      await _pauseFeedForInvisibility();
+      await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
       return;
     }
     await _playController(item.key);
@@ -575,7 +792,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   Future<void> _playController(String key) async {
     final controller = _controllerCache[key];
     if (!_canStartPlayback) {
-      await _pauseFeedForInvisibility();
+      await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
       return;
     }
     if (controller != null &&
@@ -587,8 +804,17 @@ class _VideoFeedViewState extends State<VideoFeedView>
           controller,
         );
         if (!_canStartPlayback) {
-          await _pauseFeedForInvisibility();
+          await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
           return;
+        }
+        final int playbackIndex = widget.items.indexWhere(
+          (item) => item.key == key,
+        );
+        if (playbackIndex != -1) {
+          _markPlaybackStarted(
+            item: widget.items[playbackIndex],
+            index: playbackIndex,
+          );
         }
         if (mounted) setState(() {});
       } catch (e) {
@@ -602,6 +828,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (_disposingControllers.contains(key)) return;
     _disposingControllers.add(key);
     try {
+      if (_activePlaybackKey == key) {
+        await _flushActivePlaybackSegment(
+          VideoPlaybackStopReason.controllerRemoved,
+        );
+      }
       final controller = _controllerCache[key];
       if (controller != null) {
         _controllerCache.remove(key);
@@ -693,6 +924,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.items.isEmpty) return;
     final previousIndex = _currentIndex;
     final normalized = newIndex % widget.items.length;
+    if (normalized != _currentIndex) {
+      await _flushActivePlaybackSegment(VideoPlaybackStopReason.pageChanged);
+    }
     _currentIndex = normalized;
     final isFastScroll = (newIndex - previousIndex).abs() > 1;
     try {
