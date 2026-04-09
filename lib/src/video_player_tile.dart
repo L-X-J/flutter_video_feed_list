@@ -439,7 +439,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   height: baseSize.height,
                   child: ExtendedImage.network(
                     widget.coverUrl,
-                    fit: BoxFit.fill,
+                    fit: BoxFit.cover,
                     filterQuality: FilterQuality.low,
                     cache: true,
                     clearMemoryCacheWhenDispose: true,
