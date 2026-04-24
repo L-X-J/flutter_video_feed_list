@@ -1,6 +1,6 @@
 name: flutter_video_feed_list
 description: "可重复使用的垂直短视频源，具有预加载和缓存功能。"
-version: 0.0.8
+version: 0.0.9
 homepage:
 
 environment:

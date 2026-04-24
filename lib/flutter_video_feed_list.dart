@@ -7,6 +7,7 @@ export 'src/video_feed_view.dart'
         VideoFeedView,
         VideoFeedViewController,
         VideoPlaybackSegment,
+        VideoPlaybackProgressEvent,
         VideoPlaybackState,
         VideoPlaybackStateChangeReason,
         VideoPlaybackStateEvent,

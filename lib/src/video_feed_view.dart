@@ -82,6 +82,18 @@ class VideoFeedViewController {
     if (s.mounted) s.setState(() {});
   }
 
+  /// 按指定原因暂停当前 feed。
+  ///
+  /// 业务页面在生命周期切换、路由覆盖等自动暂停场景应显式传入非手动原因，
+  /// 避免外层把系统暂停误判为用户手势暂停。
+  Future<void> pauseThisFeedForReason(VideoPlaybackStopReason reason) async {
+    final s = _state;
+    if (s == null) return;
+    await s._pauseFeedForReason(reason);
+    // ignore: invalid_use_of_protected_member
+    if (s.mounted) s.setState(() {});
+  }
+
   Future<void> resumeThisFeed() async {
     final s = _state;
     if (s == null) return;
@@ -170,6 +182,7 @@ enum VideoPlaybackState {
 /// 播放状态变化原因。
 enum VideoPlaybackStateChangeReason {
   playbackStarted,
+  manualResume,
   pageChanged,
   invisible,
   appLifecycle,
@@ -228,6 +241,25 @@ class VideoPlaybackSegment {
   final VideoPlaybackStopReason stopReason;
 }
 
+/// 单次播放进度事件。
+///
+/// 该事件只暴露业务侧需要的只读播放状态，避免页面直接依赖播放器内部控制器。
+class VideoPlaybackProgressEvent {
+  const VideoPlaybackProgressEvent({
+    required this.item,
+    required this.index,
+    required this.position,
+    required this.duration,
+    required this.isPlaying,
+  });
+
+  final IVideoItem item;
+  final int index;
+  final Duration position;
+  final Duration duration;
+  final bool isPlaying;
+}
+
 /// 视频信息流主组件
 ///
 /// - 支持上下滑动翻页、懒加载控制器与自适应窗口保留
@@ -250,6 +282,7 @@ class VideoFeedView extends StatefulWidget {
     this.onIndexChanged,
     this.onPlaybackStateChanged,
     this.onPlaybackSegment,
+    this.onPlaybackProgress,
     this.aggressiveOnFastScroll = true,
     this.evictionPolicy = EvictionPolicy.lru,
     this.ecoMode = false,
@@ -319,6 +352,12 @@ class VideoFeedView extends StatefulWidget {
   final FutureOr<void> Function(VideoPlaybackSegment segment)?
       onPlaybackSegment;
 
+  /// 当前播放进度回调。
+  ///
+  /// 回调仅针对当前页控制器，并做轻量节流，适合业务层根据时间线触发外部联动。
+  final FutureOr<void> Function(VideoPlaybackProgressEvent event)?
+      onPlaybackProgress;
+
   /// 快滑时是否激进清理，仅保留当前页控制器
   final bool aggressiveOnFastScroll;
 
@@ -372,6 +411,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
   final List<String> _accessOrder = [];
   final Set<String> _disposingControllers = <String>{};
   final Map<String, Future<VideoPlayerController?>> _creationInFlight = {};
+  final Map<String, VoidCallback> _controllerProgressListeners =
+      <String, VoidCallback>{};
   late final VideoControllerFactory _controllerFactory;
 
   late final PreloadPageController _pageController;
@@ -394,6 +435,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
   String? _activePlaybackKey;
   int? _activePlaybackIndex;
   DateTime? _activePlaybackStartedAt;
+  String? _lastProgressKey;
+  DateTime? _lastProgressNotifiedAt;
 
   /// 当前 feed 是否允许真正发起播放。
   ///
@@ -584,6 +627,52 @@ class _VideoFeedViewState extends State<VideoFeedView>
     );
   }
 
+  /// 根据控制器状态向业务层发送当前播放进度。
+  ///
+  /// 播放器内部会保留邻近页控制器，因此这里必须用当前页索引和播放状态做双重过滤，
+  /// 防止预加载或非当前页控制器的 position 变化触发业务联动。
+  void _notifyPlaybackProgress(
+    String key,
+    VideoPlayerController controller,
+  ) {
+    final callback = widget.onPlaybackProgress;
+    if (callback == null || widget.items.isEmpty) {
+      return;
+    }
+    if (_currentIndex < 0 || _currentIndex >= widget.items.length) {
+      return;
+    }
+    final currentItem = widget.items[_currentIndex];
+    if (currentItem.key != key) {
+      return;
+    }
+    final value = controller.value;
+    if (!value.isInitialized || !value.isPlaying) {
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastProgressKey != key) {
+      _lastProgressKey = key;
+      _lastProgressNotifiedAt = null;
+    }
+    final lastNotifiedAt = _lastProgressNotifiedAt;
+    if (lastNotifiedAt != null &&
+        now.difference(lastNotifiedAt) < const Duration(milliseconds: 200)) {
+      return;
+    }
+    _lastProgressNotifiedAt = now;
+    callback(
+      VideoPlaybackProgressEvent(
+        item: currentItem,
+        index: _currentIndex,
+        position: value.position,
+        duration: value.duration,
+        isPlaying: value.isPlaying,
+      ),
+    );
+  }
+
   /// 标记当前视频进入真实播放态。
   ///
   /// 只有当控制器已经成功调用 `play()` 后，才会开始累计播放时长，避免把预加载、
@@ -591,6 +680,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
   void _markPlaybackStarted({
     required IVideoItem item,
     required int index,
+    VideoPlaybackStateChangeReason reason =
+        VideoPlaybackStateChangeReason.playbackStarted,
   }) {
     final String nextKey = item.key;
     if (_activePlaybackKey == nextKey && _activePlaybackStartedAt != null) {
@@ -603,7 +694,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       item: item,
       index: index,
       state: VideoPlaybackState.started,
-      reason: VideoPlaybackStateChangeReason.playbackStarted,
+      reason: reason,
     );
   }
 
@@ -677,6 +768,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
     _activePlaybackKey = null;
     _activePlaybackIndex = null;
     _activePlaybackStartedAt = null;
+    _lastProgressKey = null;
+    _lastProgressNotifiedAt = null;
   }
 
   /// 因组件不可见而暂停当前 feed。
@@ -782,6 +875,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
     );
     if (controller == null) return null;
     _controllerCache[key] = controller;
+    void progressListener() => _notifyPlaybackProgress(key, controller);
+    _controllerProgressListeners[key] = progressListener;
+    controller.addListener(progressListener);
     VideoFeedSessionManager.instance.register(widget.feedId, controller);
     _touchController(key);
     _enforceCacheLimit(maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
@@ -837,6 +933,12 @@ class _VideoFeedViewState extends State<VideoFeedView>
       if (controller != null) {
         _controllerCache.remove(key);
         _accessOrder.remove(key);
+        final progressListener = _controllerProgressListeners.remove(key);
+        if (progressListener != null) {
+          try {
+            controller.removeListener(progressListener);
+          } catch (_) {}
+        }
         VideoFeedSessionManager.instance.unregister(widget.feedId, controller);
         try {
           if (controller.value.isInitialized && controller.value.isPlaying) {
@@ -1087,6 +1189,24 @@ class _VideoFeedViewState extends State<VideoFeedView>
                     viewportSize: viewportSize,
                     groupId: widget.feedId,
                     isCurrent: isCurrent,
+                    onManualPause: () async {
+                      if (logicalIndex != _currentIndex) {
+                        return;
+                      }
+                      await _flushActivePlaybackSegment(
+                        VideoPlaybackStopReason.manualPause,
+                      );
+                    },
+                    onManualResume: () {
+                      if (logicalIndex != _currentIndex) {
+                        return;
+                      }
+                      _markPlaybackStarted(
+                        item: item,
+                        index: logicalIndex,
+                        reason: VideoPlaybackStateChangeReason.manualResume,
+                      );
+                    },
                     bizWidgets: widget.bizWidgetsBuilder?.call(
                       context,
                       item,

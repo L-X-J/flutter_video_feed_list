@@ -28,6 +28,8 @@ class VideoPlayerTile extends StatefulWidget {
     this.bizWidgets,
     this.groupId,
     this.isCurrent = false,
+    this.onManualPause,
+    this.onManualResume,
     super.key,
   });
 
@@ -68,6 +70,16 @@ class VideoPlayerTile extends StatefulWidget {
   final List<Widget>? bizWidgets;
   final String? groupId;
   final bool isCurrent;
+
+  /// 用户点击视频区域后主动暂停播放的回调。
+  ///
+  /// 该回调只由用户手势触发，不覆盖切页、后台、释放控制器等自动暂停场景。
+  final FutureOr<void> Function()? onManualPause;
+
+  /// 用户点击视频区域后主动恢复播放的回调。
+  ///
+  /// 该回调只由用户手势触发，用于业务层区分“手动开始”和生命周期恢复。
+  final FutureOr<void> Function()? onManualResume;
 
   @override
   State<VideoPlayerTile> createState() => _VideoPlayerTileState();
@@ -474,6 +486,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                   _isPlaying = false;
                 });
                 c.pause().then((_) {
+                  unawaited(Future<void>.sync(() async {
+                    await widget.onManualPause?.call();
+                  }));
                   if (mounted) {
                     WidgetsBinding.instance.addPostFrameCallback(
                         (_) => mounted ? setState(() {}) : null);
@@ -489,6 +504,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                 VideoFeedSessionManager.instance
                     .playExclusive(widget.groupId ?? '', c)
                     .then((_) {
+                  unawaited(Future<void>.sync(() async {
+                    await widget.onManualResume?.call();
+                  }));
                   if (mounted) {
                     WidgetsBinding.instance.addPostFrameCallback(
                         (_) => mounted ? setState(() {}) : null);
