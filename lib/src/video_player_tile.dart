@@ -18,6 +18,10 @@ class VideoPlayerTile extends StatefulWidget {
     required this.controller,
     required this.videoId,
     required this.coverUrl,
+    this.videoWidth,
+    this.videoHeight,
+    this.videoCoverWidth,
+    this.videoCoverHeight,
     this.coverFit,
     this.videoDisplayMode = VideoDisplayMode.cover,
     required this.viewportSize,
@@ -35,6 +39,18 @@ class VideoPlayerTile extends StatefulWidget {
 
   /// 视频封面图片地址
   final String coverUrl;
+
+  /// 服务端返回的视频原始宽度。
+  final int? videoWidth;
+
+  /// 服务端返回的视频原始高度。
+  final int? videoHeight;
+
+  /// 服务端返回的封面图原始宽度。
+  final int? videoCoverWidth;
+
+  /// 服务端返回的封面图原始高度。
+  final int? videoCoverHeight;
 
   /// 封面默认适配方式。
   ///
@@ -73,9 +89,6 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
   Timer? _bizDelayTimer;
   bool _lastShowCover = false;
   bool _bizInitApplied = false;
-  Size? _coverImageSize;
-  ImageStream? _coverImageStream;
-  ImageStreamListener? _coverImageListener;
 
   @override
   void initState() {
@@ -91,7 +104,6 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _overlayFade.forward();
     });
-    _resolveCoverImageSize();
   }
 
   void _addControllerListener() {
@@ -145,11 +157,6 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         });
       }
     }
-
-    if (oldWidget.coverUrl != widget.coverUrl) {
-      _coverImageSize = null;
-      _resolveCoverImageSize();
-    }
     // 保持叠层稳定显示，不在每次更新时重新执行淡入，避免稳态切换时闪烁
   }
 
@@ -162,86 +169,70 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     _oldController = null;
     _overlayFade.dispose();
     _bizDelayTimer?.cancel();
-    _disposeCoverImageStream();
     super.dispose();
   }
 
-  /// 解析封面图的原始尺寸。
+  /// 解析当前条目封面阶段用于布局的参考尺寸。
   ///
-  /// 在视频控制器尚未初始化完成时，播放器还拿不到真实视频宽高。
-  /// 这里提前读取封面图尺寸，作为同一条内容在占位阶段的比例参考，
-  /// 尽量保证“封面怎么展示，视频初始化后也怎么展示”。
-  void _resolveCoverImageSize() {
-    _disposeCoverImageStream();
-    if (widget.coverUrl.isEmpty) {
-      return;
-    }
-    final ImageProvider provider = NetworkImage(widget.coverUrl);
-    final ImageStream stream = provider.resolve(ImageConfiguration.empty);
-    final ImageStreamListener listener = ImageStreamListener((image, _) {
-      final Size nextSize = Size(
-        image.image.width.toDouble(),
-        image.image.height.toDouble(),
-      );
-      if (!mounted || _coverImageSize == nextSize) {
-        return;
-      }
-      setState(() {
-        _coverImageSize = nextSize;
-      });
-    });
-    _coverImageStream = stream;
-    _coverImageListener = listener;
-    stream.addListener(listener);
+  /// 封面阶段以服务端封面尺寸为准；如果旧接口没有返回封面尺寸，再按视频尺寸、
+  /// 控制器尺寸和视口依次回退，保证旧数据仍然可以展示。
+  Size _resolveCoverReferenceSize(VideoPlayerController? controller) {
+    return _sizeFromDimensions(
+          width: widget.videoCoverWidth,
+          height: widget.videoCoverHeight,
+        ) ??
+        _sizeFromDimensions(
+          width: widget.videoWidth,
+          height: widget.videoHeight,
+        ) ??
+        _resolveControllerReferenceSize(controller) ??
+        widget.viewportSize;
   }
 
-  /// 释放封面尺寸监听。
+  /// 解析当前条目视频阶段用于布局的参考尺寸。
   ///
-  /// 封面 URL 切换或组件销毁时必须解绑图片流监听，避免旧条目的异步回调串到
-  /// 新视频上，造成封面比例偶发跳变。
-  void _disposeCoverImageStream() {
-    final stream = _coverImageStream;
-    final listener = _coverImageListener;
-    if (stream != null && listener != null) {
-      stream.removeListener(listener);
-    }
-    _coverImageStream = null;
-    _coverImageListener = null;
+  /// 视频阶段以服务端视频尺寸为准，避免控制器初始化前后因尺寸读取时机不同产生
+  /// 二次布局；旧数据缺少尺寸时才回退到控制器与封面尺寸。
+  Size _resolveVideoReferenceSize(VideoPlayerController? controller) {
+    return _sizeFromDimensions(
+          width: widget.videoWidth,
+          height: widget.videoHeight,
+        ) ??
+        _resolveControllerReferenceSize(controller) ??
+        _sizeFromDimensions(
+          width: widget.videoCoverWidth,
+          height: widget.videoCoverHeight,
+        ) ??
+        widget.viewportSize;
   }
 
-  /// 解析当前条目用于布局的参考尺寸。
-  ///
-  /// 优先级依次为：已初始化视频的真实宽高比、已解析出的封面尺寸、当前控制器可用尺寸、
-  /// 最后才回退到视口本身。这样做的原因是：
-  /// - 封面阶段优先保证首帧稳定，不闪不跳；
-  /// - 播放阶段一旦拿到真实视频比例，就必须以视频自身为准，避免把 9:16 封面
-  ///   的布局误套到 3:4 左右的视频上，造成“封面正常、视频被放大”的错觉。
-  Size _resolveReferenceSize(VideoPlayerController? controller) {
-    if (controller != null) {
-      final Size? controllerAspectSize =
-          _resolveControllerAspectSize(controller);
-      if (controllerAspectSize != null) {
-        return controllerAspectSize;
+  /// 把服务端返回的宽高字段转换为布局可用的尺寸。
+  Size? _sizeFromDimensions({required int? width, required int? height}) {
+    if (width == null || height == null || width <= 0 || height <= 0) {
+      return null;
+    }
+    return Size(width.toDouble(), height.toDouble());
+  }
+
+  /// 解析控制器可用尺寸，作为旧数据缺少接口尺寸时的兼容兜底。
+  Size? _resolveControllerReferenceSize(VideoPlayerController? controller) {
+    if (controller == null) {
+      return null;
+    }
+    final Size? controllerAspectSize = _resolveControllerAspectSize(controller);
+    if (controllerAspectSize != null) {
+      return controllerAspectSize;
+    }
+    try {
+      final Size controllerSize = controller.value.size;
+      if (controllerSize.width > 0 &&
+          controllerSize.height > 0 &&
+          controllerSize.width.isFinite &&
+          controllerSize.height.isFinite) {
+        return controllerSize;
       }
-      try {
-        final Size controllerSize = controller.value.size;
-        if (controllerSize.width > 0 &&
-            controllerSize.height > 0 &&
-            controllerSize.width.isFinite &&
-            controllerSize.height.isFinite) {
-          return controllerSize;
-        }
-      } catch (_) {}
-    }
-    final Size? coverImageSize = _coverImageSize;
-    if (coverImageSize != null &&
-        coverImageSize.width > 0 &&
-        coverImageSize.height > 0 &&
-        coverImageSize.width.isFinite &&
-        coverImageSize.height.isFinite) {
-      return coverImageSize;
-    }
-    return widget.viewportSize;
+    } catch (_) {}
+    return null;
   }
 
   /// 根据控制器的真实宽高比生成用于布局的参考尺寸。
@@ -378,14 +369,23 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     }
     final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
-    final Size baseSize = _resolveReferenceSize(controller);
-    final VideoLayoutDecision layoutDecision = resolveVideoLayout(
+    final Size coverBaseSize = _resolveCoverReferenceSize(controller);
+    final Size videoBaseSize = _resolveVideoReferenceSize(controller);
+    final VideoLayoutDecision coverLayoutDecision = resolveVideoLayout(
       displayMode: widget.videoDisplayMode,
       viewportSize: widget.viewportSize,
-      videoSize: baseSize,
+      videoSize: coverBaseSize,
       fallbackCoverFit: widget.coverFit,
     );
-    final EdgeInsets mediaInsets = layoutDecision.mediaInsets;
+    final VideoLayoutDecision videoLayoutDecision = resolveVideoLayout(
+      displayMode: widget.videoDisplayMode,
+      viewportSize: widget.viewportSize,
+      videoSize: videoBaseSize,
+      fallbackCoverFit: widget.coverFit,
+    );
+    final VideoLayoutDecision activeLayoutDecision =
+        showCover ? coverLayoutDecision : videoLayoutDecision;
+    final EdgeInsets activeMediaInsets = activeLayoutDecision.mediaInsets;
 
     if (showCover != _lastShowCover) {
       _lastShowCover = showCover;
@@ -422,21 +422,21 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     return Stack(
       children: [
         Positioned.fill(
-          child: ColoredBox(color: layoutDecision.backgroundColor),
+          child: ColoredBox(color: activeLayoutDecision.backgroundColor),
         ),
         // 封面
         _buildMediaViewport(
-          mediaInsets: mediaInsets,
+          mediaInsets: coverLayoutDecision.mediaInsets,
           child: AnimatedOpacity(
             opacity: coverOpacity,
             duration: const Duration(milliseconds: 200),
             child: Builder(builder: (context) {
               return FittedBox(
-                fit: layoutDecision.coverFit,
-                alignment: layoutDecision.alignment,
+                fit: coverLayoutDecision.coverFit,
+                alignment: coverLayoutDecision.alignment,
                 child: SizedBox(
-                  width: baseSize.width,
-                  height: baseSize.height,
+                  width: coverBaseSize.width,
+                  height: coverBaseSize.height,
                   child: ExtendedImage.network(
                     widget.coverUrl,
                     fit: BoxFit.cover,
@@ -454,7 +454,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
         // 视频
         _buildMediaViewport(
-          mediaInsets: mediaInsets,
+          mediaInsets: videoLayoutDecision.mediaInsets,
           child: InkWell(
             onTap: () {
               if (controller == null) return;
@@ -500,11 +500,11 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             },
             child: FittedBox(
               key: _playerKey,
-              fit: layoutDecision.videoFit,
-              alignment: layoutDecision.alignment,
+              fit: videoLayoutDecision.videoFit,
+              alignment: videoLayoutDecision.alignment,
               child: SizedBox(
-                width: baseSize.width,
-                height: baseSize.height,
+                width: videoBaseSize.width,
+                height: videoBaseSize.height,
                 child: !showCover
                     ? VideoPlayer(controller)
                     : const SizedBox.shrink(),
@@ -515,7 +515,7 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
 
         if (showCover && widget.isCurrent && !hasError && _coverLoadingVisible)
           _buildCenteredMediaOverlay(
-            mediaInsets: mediaInsets,
+            mediaInsets: activeMediaInsets,
             child: const SizedBox(
               width: 28,
               height: 28,
@@ -526,7 +526,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
             ),
           ),
 
-        if (controller != null) ..._buildOverlays(controller, mediaInsets),
+        if (controller != null)
+          ..._buildOverlays(controller, activeMediaInsets),
         if (widget.bizWidgets != null)
           AnimatedOpacity(
             opacity: (_bizReady && !showCover) ? 1.0 : 0.0,
