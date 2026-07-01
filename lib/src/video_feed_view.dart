@@ -417,8 +417,13 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   late final PreloadPageController _pageController;
   int _currentIndex = 0;
+  int _lastPageViewIndex = 0;
   bool _isScrollSettled = true; // true when PageView is idle/settled
   Timer? _settleDebounce;
+  int _stableApplyGeneration = 0;
+  int? _scheduledStablePageIndex;
+  int? _pendingStablePageIndex;
+  bool _isApplyingStablePage = false;
   int _effectivePreload = 0;
   int _effectiveMaxControllers = 1;
   final Set<String> _preloadedCovers = {};
@@ -449,6 +454,183 @@ class _VideoFeedViewState extends State<VideoFeedView>
       !_released &&
       !_tearingDown;
 
+  /// 当前策略下允许保留的控制器上限。
+  int get _resolvedMaxControllers => _effectiveMaxControllers.clamp(1, 6);
+
+  /// 将 PageView 的物理页索引归一化为业务数据索引。
+  int _normalizeIndex(int index) {
+    if (widget.items.isEmpty) return 0;
+    return index % widget.items.length;
+  }
+
+  /// 滚动中的稳态任务使用最小防抖，避免短时间跨过多个页面时为中间页创建控制器。
+  Duration _stableApplyDelay({required bool duringScroll}) {
+    final configuredMs = widget.settleDelayMs < 0 ? 0 : widget.settleDelayMs;
+    if (!duringScroll) {
+      return Duration(milliseconds: configuredMs);
+    }
+    const minDuringScrollMs = 80;
+    return Duration(
+      milliseconds:
+          configuredMs < minDuringScrollMs ? minDuringScrollMs : configuredMs,
+    );
+  }
+
+  /// 获取 PageView 当前最接近的业务索引。
+  int _nearestLogicalIndex() {
+    if (widget.items.isEmpty) return 0;
+    try {
+      final page = _pageController.page;
+      if (page == null) return _currentIndex;
+      return _normalizeIndex(page.round());
+    } catch (_) {
+      return _currentIndex;
+    }
+  }
+
+  /// 判断指定 key 是否仍是当前页。
+  bool _isCurrentKey(String key) {
+    if (widget.items.isEmpty || _currentIndex >= widget.items.length) {
+      return false;
+    }
+    return widget.items[_currentIndex].key == key;
+  }
+
+  /// 计算某个目标页在当前策略下应保留的 controller key 集合。
+  Set<String> _controllerKeysForTargetWindow(int targetIndex) {
+    return controllerKeysForWindow(
+      items: widget.items,
+      currentIndex: _normalizeIndex(targetIndex),
+      maxCacheControllers: _resolvedMaxControllers,
+    );
+  }
+
+  /// 判断异步创建完成的控制器是否仍处在目标窗口中。
+  bool _shouldKeepControllerKey(String key, {int? targetIndex}) {
+    if (widget.items.isEmpty || _released || _tearingDown) {
+      return false;
+    }
+    final keysToKeep = _controllerKeysForTargetWindow(
+      targetIndex ?? _currentIndex,
+    );
+    return keysToKeep.contains(key);
+  }
+
+  /// 判断某个稳态任务是否仍是最新任务。
+  bool _isStableApplyActive(int? generation, int? targetIndex) {
+    if (!mounted || _released || _tearingDown || widget.items.isEmpty) {
+      return false;
+    }
+    if (generation != null && generation != _stableApplyGeneration) {
+      return false;
+    }
+    if (targetIndex != null && _normalizeIndex(targetIndex) != _currentIndex) {
+      return false;
+    }
+    return true;
+  }
+
+  /// 根据快滑状态刷新实际窗口策略。
+  bool _updateEffectiveWindowForScroll({required bool isFastScroll}) {
+    final bool useEco =
+        widget.ecoMode || (widget.aggressiveOnFastScroll && isFastScroll);
+    _effectivePreload = useEco ? widget.preloadAroundEco : widget.preloadAround;
+    _effectiveMaxControllers =
+        useEco ? widget.maxControllersEco : widget.maxCacheControllers;
+    return useEco;
+  }
+
+  /// 判断异步 page change 回调是否仍对应最新物理页。
+  bool _isLatestPageChange(int pageIndex, {int? normalizedIndex}) {
+    if (!mounted || _released || _tearingDown) {
+      return false;
+    }
+    if (_lastPageViewIndex != pageIndex) {
+      return false;
+    }
+    if (normalizedIndex != null && _currentIndex != normalizedIndex) {
+      return false;
+    }
+    return true;
+  }
+
+  /// 取消尚未执行的稳态任务，并使正在执行的旧任务失效。
+  void _invalidateStablePageApply() {
+    _settleDebounce?.cancel();
+    _settleDebounce = null;
+    _scheduledStablePageIndex = null;
+    _pendingStablePageIndex = null;
+    _stableApplyGeneration++;
+  }
+
+  /// 调度一次稳态页面应用。
+  ///
+  /// 只记录最新目标页，真正的控制器窗口管理由 [_drainStablePageApply] 串行执行。
+  void _scheduleStablePageApply(
+    int targetIndex, {
+    required bool duringScroll,
+    required bool markSettled,
+  }) {
+    if (widget.items.isEmpty || _released || _tearingDown) {
+      return;
+    }
+    _scheduledStablePageIndex = _normalizeIndex(targetIndex);
+    _pendingStablePageIndex = null;
+    _stableApplyGeneration++;
+    _settleDebounce?.cancel();
+
+    final generation = _stableApplyGeneration;
+    _settleDebounce = Timer(_stableApplyDelay(duringScroll: duringScroll), () {
+      if (!_isStableApplyActive(generation, null)) {
+        return;
+      }
+      final scheduledIndex = _scheduledStablePageIndex;
+      if (scheduledIndex == null) {
+        return;
+      }
+      _scheduledStablePageIndex = null;
+      _pendingStablePageIndex = scheduledIndex;
+      if (markSettled && mounted) {
+        setState(() => _isScrollSettled = true);
+      }
+      unawaited(_drainStablePageApply());
+    });
+  }
+
+  /// 串行执行稳态任务，避免多个页面同时初始化/播放控制器。
+  Future<void> _drainStablePageApply() async {
+    if (_isApplyingStablePage) {
+      return;
+    }
+    _isApplyingStablePage = true;
+    try {
+      while (
+          _isStableApplyActive(null, null) && _pendingStablePageIndex != null) {
+        final targetIndex = _pendingStablePageIndex!;
+        _pendingStablePageIndex = null;
+        final generation = _stableApplyGeneration;
+        await _applyStablePage(targetIndex, generation);
+      }
+    } finally {
+      _isApplyingStablePage = false;
+      if (_isStableApplyActive(null, null) && _pendingStablePageIndex != null) {
+        unawaited(_drainStablePageApply());
+      }
+    }
+  }
+
+  /// 切换当前业务索引，并在索引真正变化时结算上一段播放。
+  Future<void> _setCurrentIndex(
+    int index, {
+    required VideoPlaybackStopReason reason,
+  }) async {
+    if (widget.items.isEmpty) return;
+    final normalized = _normalizeIndex(index);
+    if (normalized == _currentIndex) return;
+    await _flushActivePlaybackSegment(reason);
+    _currentIndex = normalized;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -464,6 +646,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         ? (itemLen * 1000 + normalizedInitial)
         : normalizedInitial;
     _currentIndex = normalizedInitial;
+    _lastPageViewIndex = initialPage;
     _pageController = PreloadPageController(initialPage: initialPage);
     _effectivePreload =
         widget.ecoMode ? widget.preloadAroundEco : widget.preloadAround;
@@ -484,10 +667,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final generation = _stableApplyGeneration;
       await _preloadCoversAround(_currentIndex);
-      await _manageControllerWindow(_currentIndex);
+      await _manageControllerWindow(_currentIndex, generation: generation);
       // 初始化并根据 autoplay 决定是否播放，同时触发重建
-      await _initAndPlayVideo(_currentIndex);
+      await _initAndPlayVideo(_currentIndex, generation: generation);
       await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
       VideoFeedSessionManager.instance.setDelegates(
         widget.feedId,
@@ -532,8 +716,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _settleDebounce?.cancel();
-    _settleDebounce = null;
+    _invalidateStablePageApply();
     unawaited(_flushActivePlaybackSegment(VideoPlaybackStopReason.disposed));
     VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
@@ -555,8 +738,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     try {
       WidgetsBinding.instance.removeObserver(this);
     } catch (_) {}
-    _settleDebounce?.cancel();
-    _settleDebounce = null;
+    _invalidateStablePageApply();
     await _flushActivePlaybackSegment(VideoPlaybackStopReason.released);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
@@ -807,10 +989,19 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  Future<void> _initAndPlayVideo(int index) async {
+  /// 初始化目标页控制器，并在任务仍有效时播放。
+  Future<void> _initAndPlayVideo(int index, {int? generation}) async {
     if (widget.items.isEmpty || index >= widget.items.length) return;
-    final item = widget.items[index];
-    await _getOrCreateController(item);
+    final normalized = _normalizeIndex(index);
+    final item = widget.items[normalized];
+    await _getOrCreateController(
+      item,
+      generation: generation,
+      targetIndex: normalized,
+    );
+    if (!_isStableApplyActive(generation, normalized)) {
+      return;
+    }
     if (_canStartPlayback) {
       await _playController(item.key);
     }
@@ -825,25 +1016,51 @@ class _VideoFeedViewState extends State<VideoFeedView>
       ..add(key);
   }
 
-  /// 获取或创建控制器
-  Future<VideoPlayerController?> _getOrCreateController(IVideoItem item) async {
+  /// 获取或创建控制器。
+  ///
+  /// [generation] 与 [targetIndex] 用于稳态任务的过期校验，避免快滑时旧任务完成后
+  /// 把已经离开窗口的控制器重新放回缓存。
+  Future<VideoPlayerController?> _getOrCreateController(
+    IVideoItem item, {
+    int? generation,
+    int? targetIndex,
+  }) async {
     final key = item.key;
+    if (!_isStableApplyActive(generation, targetIndex) ||
+        !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
+      return null;
+    }
     if (_controllerCache.containsKey(key)) {
       _touchController(key);
       return _controllerCache[key];
     }
 
     if (_creationInFlight.containsKey(key)) {
-      return await _creationInFlight[key];
+      final controller = await _creationInFlight[key];
+      if (!_isStableApplyActive(generation, targetIndex) ||
+          !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
+        return null;
+      }
+      return controller;
     }
 
     try {
-      final int maxSize = widget.maxCacheControllers.clamp(1, 6);
+      final int maxSize = _resolvedMaxControllers;
       if (_controllerCache.length >= maxSize) {
-        _evictOne(policy: widget.evictionPolicy);
+        final protectedKeys = _controllerKeysForTargetWindow(
+          targetIndex ?? _currentIndex,
+        )..remove(key);
+        await _evictOne(
+          policy: widget.evictionPolicy,
+          protectedKeys: protectedKeys,
+        );
       }
 
-      final future = _createController(item);
+      final future = _createController(
+        item,
+        generation: generation,
+        targetIndex: targetIndex,
+      );
       _creationInFlight[key] = future;
       final controller = await future;
       _creationInFlight.remove(key);
@@ -854,13 +1071,24 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  /// 创建并初始化控制器
-  Future<VideoPlayerController?> _createController(IVideoItem item) async {
+  /// 创建并初始化控制器。
+  ///
+  /// 初始化跨越 native MediaCodec/ExoPlayer，可能在用户快速滑走后才完成；因此
+  /// 注册进缓存前必须再次确认任务 generation 与目标窗口仍有效。
+  Future<VideoPlayerController?> _createController(
+    IVideoItem item, {
+    int? generation,
+    int? targetIndex,
+  }) async {
     final key = item.key;
 
     // 如果还没检查完设备信息且在Android上，等待一下
     if (Platform.isAndroid && !_deviceCheckDone) {
       await _checkDevice();
+    }
+    if (!_isStableApplyActive(generation, targetIndex) ||
+        !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
+      return null;
     }
 
     // 如果是华为设备，强制使用 platformView
@@ -874,13 +1102,21 @@ class _VideoFeedViewState extends State<VideoFeedView>
       volume: VolumeManager.instance.volume,
     );
     if (controller == null) return null;
+    if (!_isStableApplyActive(generation, targetIndex) ||
+        !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
+      try {
+        await controller.dispose();
+      } catch (_) {}
+      logging('dispose stale controller $key before register');
+      return null;
+    }
     _controllerCache[key] = controller;
     void progressListener() => _notifyPlaybackProgress(key, controller);
     _controllerProgressListeners[key] = progressListener;
     controller.addListener(progressListener);
     VideoFeedSessionManager.instance.register(widget.feedId, controller);
     _touchController(key);
-    _enforceCacheLimit(maxCacheSize: widget.maxCacheControllers.clamp(1, 6));
+    await _enforceCacheLimit(maxCacheSize: _resolvedMaxControllers);
     return controller;
   }
 
@@ -891,6 +1127,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
       await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
       return;
     }
+    if (!_isCurrentKey(key)) {
+      return;
+    }
     if (controller != null &&
         controller.value.isInitialized &&
         !controller.value.isPlaying) {
@@ -899,8 +1138,14 @@ class _VideoFeedViewState extends State<VideoFeedView>
           widget.feedId,
           controller,
         );
-        if (!_canStartPlayback) {
-          await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
+        if (!_canStartPlayback || !_isCurrentKey(key)) {
+          if (!_canStartPlayback) {
+            await _pauseFeedForReason(VideoPlaybackStopReason.invisible);
+          } else {
+            try {
+              await controller.pause();
+            } catch (_) {}
+          }
           return;
         }
         final int playbackIndex = widget.items.indexWhere(
@@ -960,28 +1205,36 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  /// 强制执行缓存上限
-  void _enforceCacheLimit({required int maxCacheSize}) {
+  /// 强制执行缓存上限。
+  ///
+  /// native 播放器释放不是零成本操作，必须等待释放完成后再继续创建新控制器，
+  /// 否则快速滑动时容易叠加 MediaCodec 创建/释放压力。
+  Future<void> _enforceCacheLimit({required int maxCacheSize}) async {
     while (_controllerCache.length > maxCacheSize && _accessOrder.isNotEmpty) {
       final oldestKey = _accessOrder.first;
-      _removeController(oldestKey);
+      await _removeController(oldestKey);
     }
   }
 
-  /// 驱逐一个控制器
-  void _evictOne({required EvictionPolicy policy}) {
+  /// 驱逐一个控制器。
+  ///
+  /// [protectedKeys] 用于保护当前目标窗口中仍需要保留的控制器，优先驱逐窗口外缓存。
+  Future<void> _evictOne({
+    required EvictionPolicy policy,
+    Set<String> protectedKeys = const <String>{},
+  }) async {
     if (_controllerCache.isEmpty) return;
-    String? evictKey;
-    if (policy == EvictionPolicy.fifo) {
-      evictKey = _accessOrder.isNotEmpty
-          ? _accessOrder.first
-          : _controllerCache.keys.first;
-    } else {
-      evictKey = _accessOrder.isNotEmpty
-          ? _accessOrder.first
-          : _controllerCache.keys.first;
+    final candidates = _accessOrder.isNotEmpty
+        ? List<String>.from(_accessOrder)
+        : List<String>.from(_controllerCache.keys);
+    String evictKey = candidates.first;
+    for (final candidate in candidates) {
+      if (!protectedKeys.contains(candidate)) {
+        evictKey = candidate;
+        break;
+      }
     }
-    _removeController(evictKey);
+    await _removeController(evictKey);
     logging('evict $evictKey policy=$policy size=${_controllerCache.length}');
   }
 
@@ -1009,40 +1262,59 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  /// 管理控制器窗口
-  Future<void> _manageControllerWindow(int currentIndex) async {
+  /// 管理控制器窗口。
+  ///
+  /// [generation] 用于让窗口内的控制器创建也遵循 latest-wins 语义。
+  Future<void> _manageControllerWindow(
+    int currentIndex, {
+    int? generation,
+  }) async {
+    final normalized = _normalizeIndex(currentIndex);
     await manageControllerWindow(
       items: widget.items,
-      currentIndex: currentIndex,
-      maxCacheControllers: widget.maxCacheControllers,
+      currentIndex: normalized,
+      maxCacheControllers: _resolvedMaxControllers,
       controllerCache: _controllerCache,
       removeController: _removeController,
-      getOrCreateController: _getOrCreateController,
+      getOrCreateController: (item) => _getOrCreateController(
+        item,
+        generation: generation,
+        targetIndex: normalized,
+      ),
     );
   }
 
-  /// 处理页面变化
+  /// 处理页面变化。
+  ///
+  /// 页面变化回调只做轻量状态同步；真正的控制器窗口管理与播放启动由稳态任务串行执行。
   Future<void> _handlePageChange(int newIndex) async {
     if (widget.items.isEmpty) return;
-    final previousIndex = _currentIndex;
-    final normalized = newIndex % widget.items.length;
-    if (normalized != _currentIndex) {
-      await _flushActivePlaybackSegment(VideoPlaybackStopReason.pageChanged);
-    }
-    _currentIndex = normalized;
-    final isFastScroll = (newIndex - previousIndex).abs() > 1;
+    final previousPageIndex = _lastPageViewIndex;
+    _lastPageViewIndex = newIndex;
+    final normalized = _normalizeIndex(newIndex);
+    final isFastScroll = (newIndex - previousPageIndex).abs() > 1;
     try {
-      final currentItem = widget.items[_currentIndex];
+      if (!_isLatestPageChange(newIndex)) {
+        return;
+      }
+      await _setCurrentIndex(
+        normalized,
+        reason: VideoPlaybackStopReason.pageChanged,
+      );
+      if (!_isLatestPageChange(newIndex, normalizedIndex: normalized)) {
+        return;
+      }
+      final currentItem = widget.items[normalized];
       final currentKey = currentItem.key;
 
-      final bool useEco =
-          widget.ecoMode || (widget.aggressiveOnFastScroll && isFastScroll);
-      _effectivePreload =
-          useEco ? widget.preloadAroundEco : widget.preloadAround;
-      _effectiveMaxControllers =
-          useEco ? widget.maxControllersEco : widget.maxCacheControllers;
+      final useEco = _updateEffectiveWindowForScroll(
+        isFastScroll: isFastScroll,
+      );
 
-      await _preloadCoversAround(_currentIndex);
+      await _preloadCoversAround(normalized);
+      if (!_isLatestPageChange(newIndex, normalizedIndex: normalized)) {
+        return;
+      }
 
       // 仅当前播放：暂停非当前控制器
       for (final entry in _controllerCache.entries) {
@@ -1059,21 +1331,18 @@ class _VideoFeedViewState extends State<VideoFeedView>
         for (final k in idsToDispose) {
           if (k != currentKey) await _removeController(k);
         }
-      } else {
-        await manageControllerWindow(
-          items: widget.items,
-          currentIndex: _currentIndex,
-          maxCacheControllers: _effectiveMaxControllers,
-          controllerCache: _controllerCache,
-          removeController: _removeController,
-          getOrCreateController: _getOrCreateController,
-        );
+      }
+      if (!_isLatestPageChange(newIndex, normalizedIndex: normalized)) {
+        return;
       }
 
-      await _getOrCreateController(currentItem);
-      if (_canStartPlayback) await _playController(currentKey);
+      _scheduleStablePageApply(
+        normalized,
+        duringScroll: false,
+        markSettled: true,
+      );
       if (mounted) setState(() {});
-      widget.onIndexChanged?.call(_currentIndex);
+      widget.onIndexChanged?.call(normalized);
       logging(
         'page=$newIndex fast=$isFastScroll eco=$useEco effectivePreload=$_effectivePreload effectiveMax=$_effectiveMaxControllers active=${_controllerCache.length}',
       );
@@ -1082,15 +1351,32 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
   }
 
-  /// 应用稳态页面逻辑
-  Future<void> _applyStablePage() async {
-    if (widget.items.isEmpty || _currentIndex >= widget.items.length) return;
-    await _manageControllerWindow(_currentIndex);
-    await _initAndPlayVideo(_currentIndex);
-    final currentItem = widget.items[_currentIndex];
+  /// 应用稳态页面逻辑。
+  ///
+  /// 该方法只允许由 [_drainStablePageApply] 串行调用；每个 await 后都检查
+  /// generation，确保旧任务不会播放或注册已经过期的页面。
+  Future<void> _applyStablePage(int targetIndex, int generation) async {
+    if (widget.items.isEmpty) return;
+    final normalized = _normalizeIndex(targetIndex);
+    await _setCurrentIndex(
+      normalized,
+      reason: VideoPlaybackStopReason.pageChanged,
+    );
+    if (!_isStableApplyActive(generation, normalized)) {
+      return;
+    }
+    await _manageControllerWindow(normalized, generation: generation);
+    if (!_isStableApplyActive(generation, normalized)) {
+      return;
+    }
+    await _initAndPlayVideo(normalized, generation: generation);
+    if (!_isStableApplyActive(generation, normalized)) {
+      return;
+    }
+    final currentItem = widget.items[normalized];
     final c = _controllerCache[currentItem.key];
     VideoFeedSessionManager.instance.setCurrent(widget.feedId, c);
-    widget.onIndexChanged?.call(_currentIndex);
+    widget.onIndexChanged?.call(normalized);
   }
 
   /// 监听滚动通知
@@ -1104,7 +1390,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
           if (mounted) _isScrollSettled = false;
         });
       }
-      _settleDebounce?.cancel();
+      _invalidateStablePageApply();
       if (n is ScrollUpdateNotification) {
         final page = _pageController.page;
         final len = widget.items.length;
@@ -1113,23 +1399,23 @@ class _VideoFeedViewState extends State<VideoFeedView>
           final frac = 1.0 - (page - nearest).abs();
           final threshold = widget.playThreshold.clamp(0.5, 1.0);
           if (frac >= threshold) {
-            final normalized = nearest % len;
+            final normalized = _normalizeIndex(nearest);
             if (_currentIndex != normalized) {
-              _currentIndex = normalized;
-              _applyStablePage();
+              _scheduleStablePageApply(
+                normalized,
+                duringScroll: true,
+                markSettled: false,
+              );
             }
           }
         }
       }
     } else if (n is ScrollEndNotification ||
         (n is UserScrollNotification && n.direction == ScrollDirection.idle)) {
-      _settleDebounce?.cancel();
-      _settleDebounce = Timer(
-        Duration(milliseconds: widget.settleDelayMs),
-        () async {
-          if (mounted) setState(() => _isScrollSettled = true);
-          await _applyStablePage();
-        },
+      _scheduleStablePageApply(
+        _nearestLogicalIndex(),
+        duringScroll: false,
+        markSettled: true,
       );
     }
     return false;

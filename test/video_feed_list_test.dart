@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_video_feed_list/flutter_video_feed_list.dart';
+import 'package:flutter_video_feed_list/src/services/window_manager.dart';
 import 'package:flutter_video_feed_list/src/video_layout.dart';
 
 /// `resolveVideoLayout` 的比例决策测试。
@@ -9,6 +10,47 @@ import 'package:flutter_video_feed_list/src/video_layout.dart';
 /// “普通素材完整展示优先、9:16 手机竖版保留底部业务区”的规则，同时验证默认
 /// `cover` 模式没有回归。
 void main() {
+  group('controllerKeysForWindow', () {
+    final items = List<DefaultVideoItem>.generate(
+      4,
+      (index) => DefaultVideoItem(
+        id: 'v$index',
+        videoUrl: 'https://example.com/v$index.mp4',
+        coverUrl: 'https://example.com/v$index.jpg',
+      ),
+    );
+
+    test('max 为 1 时只保留当前页', () {
+      final keys = controllerKeysForWindow(
+        items: items,
+        currentIndex: 2,
+        maxCacheControllers: 1,
+      );
+
+      expect(keys, <String>{'v2'});
+    });
+
+    test('优先保留当前页和最近邻居', () {
+      final keys = controllerKeysForWindow(
+        items: items,
+        currentIndex: 1,
+        maxCacheControllers: 2,
+      );
+
+      expect(keys, <String>{'v1', 'v0'});
+    });
+
+    test('边界页按现有窗口策略环绕保留邻居', () {
+      final keys = controllerKeysForWindow(
+        items: items,
+        currentIndex: 0,
+        maxCacheControllers: 2,
+      );
+
+      expect(keys, <String>{'v0', 'v3'});
+    });
+  });
+
   group('resolveVideoLayout', () {
     test('默认 cover 模式保持旧行为', () {
       final decision = resolveVideoLayout(

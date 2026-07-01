@@ -3,6 +3,40 @@ import 'package:video_player/video_player.dart';
 import '../models/video_item.dart';
 import '../utils/logging.dart';
 
+/// 计算当前索引附近应该保留的控制器 key 集合。
+///
+/// 该函数是窗口策略的单一计算入口，供窗口管理与异步创建后的过期校验共用，
+/// 避免快速滑动时已经离开窗口的控制器在初始化完成后重新注册进缓存。
+Set<String> controllerKeysForWindow({
+  required List<IVideoItem> items,
+  required int currentIndex,
+  required int maxCacheControllers,
+}) {
+  if (items.isEmpty) return <String>{};
+
+  final maxKeep = maxCacheControllers.clamp(1, items.length);
+  final keysToKeep = <String>{};
+  int wrap(int i) => (i % items.length + items.length) % items.length;
+  final centerKey = items[wrap(currentIndex)].key;
+  keysToKeep.add(centerKey);
+
+  int left = currentIndex - 1;
+  int right = currentIndex + 1;
+  while (keysToKeep.length < maxKeep && (left >= 0 || right < items.length)) {
+    if (left >= -items.length) {
+      keysToKeep.add(items[wrap(left)].key);
+      left--;
+      if (keysToKeep.length >= maxKeep) break;
+    }
+    if (right < items.length * 2) {
+      keysToKeep.add(items[wrap(right)].key);
+      right++;
+    }
+  }
+
+  return keysToKeep;
+}
+
 /// 窗口控制：在当前索引附近保留有限数量的控制器
 ///
 /// - [items] 数据源列表
@@ -22,25 +56,12 @@ Future<void> manageControllerWindow({
       getOrCreateController,
 }) async {
   if (items.isEmpty) return;
-  final keysToKeep = <String>{};
+  final keysToKeep = controllerKeysForWindow(
+    items: items,
+    currentIndex: currentIndex,
+    maxCacheControllers: maxCacheControllers,
+  );
   int wrap(int i) => (i % items.length + items.length) % items.length;
-  final centerKey = items[wrap(currentIndex)].key;
-  keysToKeep.add(centerKey);
-
-  int left = currentIndex - 1;
-  int right = currentIndex + 1;
-  while (keysToKeep.length < maxCacheControllers &&
-      (left >= 0 || right < items.length)) {
-    if (left >= -items.length) {
-      keysToKeep.add(items[wrap(left)].key);
-      left--;
-      if (keysToKeep.length >= maxCacheControllers) break;
-    }
-    if (right < items.length * 2) {
-      keysToKeep.add(items[wrap(right)].key);
-      right++;
-    }
-  }
 
   // 超出保留集合的控制器全部释放
   final keysToDispose =

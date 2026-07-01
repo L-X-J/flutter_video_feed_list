@@ -3,7 +3,7 @@
 ## 简介
 - 提供短视频信息流页面组件 `VideoFeedView`，支持上下滑动翻页、滑到即播、低内存运行策略
 - 视频显示采用 Cover（铺满且不变形），加载/缓冲/错误叠层统一管理
-- 内置控制器窗口管理、并发防重与缓存驱逐（LRU/FIFO），减少纹理峰值与抖动
+- 内置控制器窗口管理、稳态串行调度、并发防重与缓存驱逐（LRU/FIFO），减少纹理峰值与抖动
 - 支持封面图片的邻近预加载，避免滑动时白屏
 
 ## 安装与引入
@@ -33,7 +33,7 @@ VideoFeedView(
   maxCacheControllers: 2,
   // 建议：启用封面预加载
   preloadCoverAround: 2,
-  // 建议：去掉稳态延时以“滑到即播”
+  // 可设为 0；组件内部会对滚动中的稳态任务做最小防抖
   settleDelayMs: 0,
   showControllerOnlyOnCurrentPage: true,
   aggressiveOnFastScroll: true,
@@ -51,7 +51,7 @@ VideoFeedView(
 - `preloadAround`：邻近页控制器预初始化数量（慢滑建议 1）
 - `preloadCoverAround`：邻近页封面预加载数量，避免滑动时白屏（建议 2）
 - `maxCacheControllers`：控制器缓存上限，避免纹理/内存过高（建议 1–2）
-- `settleDelayMs`：滚动结束到稳态的延迟（毫秒），“滑到即播”场景建议 0
+- `settleDelayMs`：滚动结束到稳态的延迟（毫秒）；即使设为 0，滚动过程中也会使用内部最小防抖避免为中间页创建播放器
 - `infiniteScroll`：是否启用“近似无限”滚动（通过重复页实现，默认 true）
 - `imageCacheMaxBytes`：全局图片缓存上限（字节），控制封面占用（默认 32MB）
 - `showControllerOnlyOnCurrentPage`：仅当前页渲染控制器，其他页只显示封面，降低纹理占用（默认 true）
@@ -70,6 +70,7 @@ VideoFeedView(
 - 并发防重与预驱逐：
   - 同一 key 的创建会复用进行中的 Future，避免重复创建
   - 创建前按 LRU/FIFO 预驱逐 1 个缓存项，避免“先创建再回收”的内存峰值
+  - 滚动中只记录最新目标页，控制器窗口管理串行执行，旧 generation 完成后不会播放或注册过期控制器
 - 封面优化：
   - 启用 `preloadCoverAround`，并根据父容器与设备像素比进行尺寸预估，减少白屏与过度内存占用
   - 封面使用低质量与限制尺寸（组件内部已按 `ResizeImage` 预估尺寸）
@@ -131,12 +132,13 @@ VideoFeedView(
 - `src/models/video_item.dart`：实体类；中文注释说明字段语义
 - `src/enums/eviction_policy.dart`：缓存驱逐策略枚举（LRU/FIFO）
 - `src/services/window_manager.dart`：窗口保留策略（当前+邻居、清理与初始化）
-- `src/widgets/video_feed_view.dart`：主视图组件（滑到即播、参数接入）
-- `src/widgets/video_player_tile.dart`：单条播放组件（FittedBox Cover 渲染与轻量叠层）
+- `src/video_feed_view.dart`：主视图组件（滑到即播、参数接入、稳态串行调度）
+- `src/video_player_tile.dart`：单条播放组件（FittedBox Cover 渲染与轻量叠层）
 - `src/utils/logging.dart`：受开关控制的日志输出
 
 ## 变更日志（本版本）
 - 新增：`ecoMode/maxControllersEco/preloadAroundEco` 自适应运行参数
 - 新增：`preloadCoverAround` 封面邻近预加载，提升滑动体验
 - 拆分：models/enums/services/widgets/utils 分层与中文注释完善
-- 优化：滑到即播、快滑仅当前、并发防重与容量预驱逐
+- 优化：滑到即播、快滑仅当前、并发防重、容量预驱逐与过期 controller 丢弃
+- 修复：快速滑动时滚动更新不再直接触发播放器创建/播放，避免平台消息和 MediaCodec 创建释放堆积
