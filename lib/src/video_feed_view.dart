@@ -15,6 +15,7 @@ import 'enums/video_display_mode.dart';
 import 'models/video_item.dart';
 import 'services/controller_factory.dart';
 import 'services/feed_session_manager.dart';
+import 'services/video_cache_proxy_server.dart';
 import 'services/volume_manager.dart';
 import 'services/window_manager.dart';
 import 'utils/logging.dart';
@@ -35,6 +36,43 @@ import 'video_player_tile.dart';
 class VideoFeedViewController {
   _VideoFeedViewState? _state;
   bool? _pendingAutoplay;
+
+  /// 跳转到数据源的指定索引，不重新创建信息流。
+  Future<void> jumpToIndex(int index) async {
+    final s = _state;
+    if (s == null || !s.mounted || index < 0 || index >= s.widget.items.length)
+      return;
+    final physical =
+        s.widget.infiniteScroll ? s.widget.items.length * 1000 + index : index;
+    s._pageController.jumpToPage(physical);
+    await s._handlePageChange(physical);
+  }
+
+  /// 定位当前条目进度；保留暂停意图，不产生隐式 play。
+  Future<void> seekTo(Duration position) async {
+    final s = _state;
+    if (s == null || s.widget.items.isEmpty) return;
+    final c = s._controllerCache[s.widget.items[s._currentIndex].key];
+    if (c == null || !c.value.isInitialized) return;
+    final milliseconds =
+        position.inMilliseconds.clamp(0, c.value.duration.inMilliseconds);
+    await c.seekTo(Duration(milliseconds: milliseconds));
+  }
+
+  /// 释放失败的当前控制器并重新初始化，其他条目及缓存窗口不重置。
+  Future<void> retryCurrent() async {
+    final s = _state;
+    if (s == null || s.widget.items.isEmpty || s._retrying) return;
+    s._retrying = true;
+    try {
+      final item = s.widget.items[s._currentIndex];
+      s._failedKeys.remove(item.key);
+      await s._removeController(item.key);
+      if (s.mounted) await s._initAndPlayVideo(s._currentIndex);
+    } finally {
+      s._retrying = false;
+    }
+  }
 
   void _bind(_VideoFeedViewState s) {
     _state = s;
@@ -61,6 +99,14 @@ class VideoFeedViewController {
     try {
       await s._pageController.nextPage(duration: duration, curve: curve);
     } catch (_) {}
+  }
+
+  /// 当前已初始化的活动播放器；不返回预加载项，不转移销毁所有权。
+  /// 用于媒体帧/音频旁路分析，不允许调用方替换或销毁控制器。
+  VideoPlayerController? get currentPlayer {
+    final state=_state;
+    if (state==null || !state.mounted || state.widget.items.isEmpty || state._currentIndex>=state.widget.items.length) return null;
+    return state._controllerCache[state.widget.items[state._currentIndex].key];
   }
 
   /// 获取当前真实索引（取模后的一致索引）
@@ -97,6 +143,7 @@ class VideoFeedViewController {
   Future<void> resumeThisFeed() async {
     final s = _state;
     if (s == null) return;
+    s._manuallyPausedKey = null;
     await s._resumeCurrentIfAllowed();
     // ignore: invalid_use_of_protected_member
     if (s.mounted) s.setState(() {});
@@ -251,6 +298,7 @@ class VideoPlaybackProgressEvent {
     required this.position,
     required this.duration,
     required this.isPlaying,
+    this.buffered = Duration.zero,
   });
 
   final IVideoItem item;
@@ -258,6 +306,8 @@ class VideoPlaybackProgressEvent {
   final Duration position;
   final Duration duration;
   final bool isPlaying;
+  /// 当前已缓冲到的最远位置；未知时为 Duration.zero。
+  final Duration buffered;
 }
 
 /// 视频信息流主组件
@@ -272,6 +322,10 @@ class VideoFeedView extends StatefulWidget {
     this.initialIndex = 0,
     this.loop = true,
     this.autoplay = true,
+    this.playbackAllowed = true,
+    this.preserveManualPause = false,
+    this.reportPausedProgress = false,
+    this.onPlaybackError,
     this.preloadAround = 0,
     this.preloadCoverAround = 2,
     this.maxCacheControllers = 2,
@@ -289,6 +343,7 @@ class VideoFeedView extends StatefulWidget {
     this.maxControllersEco = 1,
     this.preloadAroundEco = 0,
     this.bizWidgetsBuilder,
+    this.mediaOverlayBuilder,
     this.viewType = VideoViewType.textureView,
     this.videoPlayerOptions,
     this.emptyBuilder,
@@ -317,6 +372,18 @@ class VideoFeedView extends StatefulWidget {
 
   /// 是否自动播放（初始化完成后立即播放）
   final bool autoplay;
+
+  /// 宿主显式许可；用于 IndexedStack、横向标签和路由遮挡，不依赖延迟可见性回调。
+  final bool playbackAllowed;
+
+  /// 显式开启后，生命周期恢复不覆盖用户对当前条目的手动暂停。
+  final bool preserveManualPause;
+
+  /// 可选地报告暂停、拖动和播完状态；默认不改变已有进度消费者的触发语义。
+  final bool reportPausedProgress;
+
+  /// 初始化或运行失败回调；不向宿主泄露原始媒体地址。
+  final void Function(IVideoItem item)? onPlaybackError;
 
   /// 在当前索引附近预初始化的数量（慢滑场景建议为 1）
   final int
@@ -377,6 +444,14 @@ class VideoFeedView extends StatefulWidget {
   final List<Widget> Function(BuildContext context, IVideoItem item, int index)?
       bizWidgetsBuilder;
 
+  /// 使用当前条目真实的画面矩形构建控件；不把视频适配策略复制到宿主。
+  final Widget? Function(
+    BuildContext context,
+    IVideoItem item,
+    int index,
+    Rect mediaBounds,
+  )? mediaOverlayBuilder;
+
   final VideoViewType viewType;
 
   final VideoPlayerOptions? videoPlayerOptions;
@@ -433,6 +508,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
   bool _released = false;
   bool _tearingDown = false;
   bool _autoplayEnabled = true;
+  bool _retrying = false;
+  String? _manuallyPausedKey;
+  final Set<String> _failedKeys = {};
   bool _isHuawei = false;
   bool _deviceCheckDone = false;
   bool _isAppForeground = true;
@@ -442,6 +520,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
   DateTime? _activePlaybackStartedAt;
   String? _lastProgressKey;
   DateTime? _lastProgressNotifiedAt;
+  bool? _lastProgressPlaying;
 
   /// 当前 feed 是否允许真正发起播放。
   ///
@@ -449,6 +528,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
   /// 避免异步初始化、缓冲完成或外部 resume 在页面不可见时把视频重新播起来。
   bool get _canStartPlayback =>
       _autoplayEnabled &&
+      widget.playbackAllowed &&
+      !(widget.preserveManualPause &&
+          widget.items.isNotEmpty &&
+          _currentIndex < widget.items.length &&
+          _manuallyPausedKey == widget.items[_currentIndex].key) &&
       _isAppForeground &&
       _visibleFraction > 0.01 &&
       !_released &&
@@ -669,10 +753,13 @@ class _VideoFeedViewState extends State<VideoFeedView>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final generation = _stableApplyGeneration;
       await _preloadCoversAround(_currentIndex);
+      _prefetchVideosAround(_currentIndex);
       await _manageControllerWindow(_currentIndex, generation: generation);
       // 初始化并根据 autoplay 决定是否播放，同时触发重建
       await _initAndPlayVideo(_currentIndex, generation: generation);
-      await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
+      if (_canStartPlayback) {
+        await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
+      }
       VideoFeedSessionManager.instance.setDelegates(
         widget.feedId,
         clearOthersKeepCurrent: _disposeOthersKeepCurrent,
@@ -715,6 +802,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
   @override
   void dispose() {
+    _released = true;
+    if (widget.controller?._state == this) widget.controller?._state = null;
     WidgetsBinding.instance.removeObserver(this);
     _invalidateStablePageApply();
     unawaited(_flushActivePlaybackSegment(VideoPlaybackStopReason.disposed));
@@ -722,6 +811,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
     _disposeAllControllers();
     _volumeSub?.cancel();
+    _controllerFactory.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
@@ -751,7 +842,46 @@ class _VideoFeedViewState extends State<VideoFeedView>
   void didUpdateWidget(VideoFeedView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      if (oldWidget.controller?._state == this)
+        oldWidget.controller?._state = null;
       widget.controller?._bind(this);
+    }
+    if (oldWidget.playbackAllowed != widget.playbackAllowed) {
+      if (widget.playbackAllowed) {
+        unawaited(_resumeCurrentIfAllowed());
+      } else {
+        unawaited(_pauseFeedForReason(VideoPlaybackStopReason.invisible));
+      }
+    }
+    // 追加分页不重置当前页；替换/删除数据后清理失效控制器并重新调度最新页。
+    final oldKeys = oldWidget.items.map((item) => item.key).toList();
+    final newKeys = widget.items.map((item) => item.key).toList();
+    if (oldKeys.length != newKeys.length ||
+        oldKeys.asMap().entries.any((entry) =>
+            entry.key >= newKeys.length || newKeys[entry.key] != entry.value)) {
+      final oldCurrentKey = oldKeys.isEmpty
+          ? null
+          : oldKeys[_currentIndex.clamp(0, oldKeys.length - 1)];
+      final retainedIndex =
+          oldCurrentKey == null ? -1 : newKeys.indexOf(oldCurrentKey);
+      final appendOnly = newKeys.length >= oldKeys.length &&
+          oldKeys
+              .asMap()
+              .entries
+              .every((entry) => newKeys[entry.key] == entry.value);
+      if (!appendOnly) {
+        _invalidateStablePageApply();
+        _currentIndex = retainedIndex >= 0 ? retainedIndex : 0;
+        for (final key in List<String>.from(_controllerCache.keys)) {
+          if (!newKeys.contains(key)) unawaited(_removeController(key));
+        }
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || widget.items.isEmpty) return;
+        if (!appendOnly) _pageController.jumpToPage(_currentIndex);
+        _scheduleStablePageApply(_currentIndex,
+            duringScroll: false, markSettled: true);
+      });
     }
   }
 
@@ -829,7 +959,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
       return;
     }
     final value = controller.value;
-    if (!value.isInitialized || !value.isPlaying) {
+    if (!value.isInitialized ||
+        (!widget.reportPausedProgress && !value.isPlaying)) {
       return;
     }
 
@@ -837,13 +968,21 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (_lastProgressKey != key) {
       _lastProgressKey = key;
       _lastProgressNotifiedAt = null;
+      _lastProgressPlaying = null;
     }
     final lastNotifiedAt = _lastProgressNotifiedAt;
     if (lastNotifiedAt != null &&
+        _lastProgressPlaying == value.isPlaying &&
         now.difference(lastNotifiedAt) < const Duration(milliseconds: 200)) {
       return;
     }
     _lastProgressNotifiedAt = now;
+    _lastProgressPlaying = value.isPlaying;
+    // 取 buffered 列表中最远的结束位置作为已缓冲进度。
+    Duration bufferedEnd = Duration.zero;
+    for (final range in value.buffered) {
+      if (range.end > bufferedEnd) bufferedEnd = range.end;
+    }
     callback(
       VideoPlaybackProgressEvent(
         item: currentItem,
@@ -851,6 +990,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
         position: value.position,
         duration: value.duration,
         isPlaying: value.isPlaying,
+        buffered: bufferedEnd,
       ),
     );
   }
@@ -958,6 +1098,10 @@ class _VideoFeedViewState extends State<VideoFeedView>
   ///
   /// 这里不会修改 autoplay 开关，只是把已经在排队或正在缓冲的播放请求压回暂停态。
   Future<void> _pauseFeedForReason(VideoPlaybackStopReason reason) async {
+    if (reason == VideoPlaybackStopReason.manualPause &&
+        widget.items.isNotEmpty) {
+      _manuallyPausedKey = widget.items[_currentIndex].key;
+    }
     await _flushActivePlaybackSegment(reason);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     if (mounted) {
@@ -1026,6 +1170,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     int? targetIndex,
   }) async {
     final key = item.key;
+    if (_failedKeys.contains(key)) return null;
     if (!_isStableApplyActive(generation, targetIndex) ||
         !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
       return null;
@@ -1100,8 +1245,16 @@ class _VideoFeedViewState extends State<VideoFeedView>
       viewType: effectiveViewType,
       loop: widget.loop,
       volume: VolumeManager.instance.volume,
+      videoPlayerOptions: widget.videoPlayerOptions,
     );
-    if (controller == null) return null;
+    if (controller == null) {
+      if (_isStableApplyActive(generation, targetIndex)) {
+        _failedKeys.add(key);
+        widget.onPlaybackError?.call(item);
+        if (mounted) setState(() {});
+      }
+      return null;
+    }
     if (!_isStableApplyActive(generation, targetIndex) ||
         !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
       try {
@@ -1111,7 +1264,13 @@ class _VideoFeedViewState extends State<VideoFeedView>
       return null;
     }
     _controllerCache[key] = controller;
-    void progressListener() => _notifyPlaybackProgress(key, controller);
+    void progressListener() {
+      if (controller.value.hasError && _failedKeys.add(key)) {
+        widget.onPlaybackError?.call(item);
+      }
+      _notifyPlaybackProgress(key, controller);
+    }
+
     _controllerProgressListeners[key] = progressListener;
     controller.addListener(progressListener);
     VideoFeedSessionManager.instance.register(widget.feedId, controller);
@@ -1312,6 +1471,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       );
 
       await _preloadCoversAround(normalized);
+      _prefetchVideosAround(normalized);
       if (!_isLatestPageChange(newIndex, normalizedIndex: normalized)) {
         return;
       }
@@ -1460,52 +1620,98 @@ class _VideoFeedViewState extends State<VideoFeedView>
                             : true) &&
                         !_disposingControllers.contains(item.key);
                 final safeController = shouldShowController ? controller : null;
-                return RepaintBoundary(
-                  key: ValueKey('${item.key}#$index'),
-                  child: VideoPlayerTile(
-                    controller: safeController,
-                    videoId: item.key,
-                    coverUrl: item.coverUrl,
-                    videoWidth: item.videoWidth,
-                    videoHeight: item.videoHeight,
-                    videoCoverWidth: item.videoCoverWidth,
-                    videoCoverHeight: item.videoCoverHeight,
-                    coverFit: widget.coverFit,
-                    videoDisplayMode: widget.videoDisplayMode,
-                    viewportSize: viewportSize,
-                    groupId: widget.feedId,
-                    isCurrent: isCurrent,
-                    onManualPause: () async {
-                      if (logicalIndex != _currentIndex) {
-                        return;
-                      }
-                      await _flushActivePlaybackSegment(
-                        VideoPlaybackStopReason.manualPause,
-                      );
-                    },
-                    onManualResume: () {
-                      if (logicalIndex != _currentIndex) {
-                        return;
-                      }
-                      _markPlaybackStarted(
-                        item: item,
-                        index: logicalIndex,
-                        reason: VideoPlaybackStateChangeReason.manualResume,
-                      );
-                    },
-                    bizWidgets: widget.bizWidgetsBuilder?.call(
-                      context,
-                      item,
-                      logicalIndex,
+                return Stack(fit: StackFit.expand, children: [
+                  RepaintBoundary(
+                    key: ValueKey('${item.key}#$index'),
+                    child: VideoPlayerTile(
+                      controller: safeController,
+                      videoId: item.key,
+                      coverUrl: item.coverUrl,
+                      videoWidth: item.videoWidth,
+                      videoHeight: item.videoHeight,
+                      videoCoverWidth: item.videoCoverWidth,
+                      videoCoverHeight: item.videoCoverHeight,
+                      coverFit: widget.coverFit,
+                      videoDisplayMode: widget.videoDisplayMode,
+                      viewportSize: viewportSize,
+                      groupId: widget.feedId,
+                      isCurrent: isCurrent,
+                      onManualPause: () async {
+                        if (logicalIndex != _currentIndex) {
+                          return;
+                        }
+                        _manuallyPausedKey = item.key;
+                        await _flushActivePlaybackSegment(
+                          VideoPlaybackStopReason.manualPause,
+                        );
+                      },
+                      onManualResume: () {
+                        if (logicalIndex != _currentIndex) {
+                          return;
+                        }
+                        _manuallyPausedKey = null;
+                        if (!_canStartPlayback) {
+                          unawaited(_pauseFeedForReason(
+                              VideoPlaybackStopReason.invisible));
+                          return;
+                        }
+                        _markPlaybackStarted(
+                          item: item,
+                          index: logicalIndex,
+                          reason: VideoPlaybackStateChangeReason.manualResume,
+                        );
+                      },
+                      mediaOverlayBuilder: widget.mediaOverlayBuilder == null
+                          ? null
+                          : (context, bounds) => widget.mediaOverlayBuilder!(
+                              context, item, logicalIndex, bounds),
+                      bizWidgets: widget.bizWidgetsBuilder?.call(
+                        context,
+                        item,
+                        logicalIndex,
+                      ),
                     ),
                   ),
-                );
+                  if (_failedKeys.contains(item.key))
+                    Center(
+                        child: IconButton(
+                      tooltip: 'Retry video',
+                      icon: const Icon(Icons.refresh,
+                          color: Colors.white, size: 40),
+                      onPressed: () => widget.controller?.retryCurrent(),
+                    )),
+                ]);
               },
             ),
           );
         },
       ),
     );
+  }
+
+  /// 后台预热当前索引附近视频的下载缓存。
+  ///
+  /// 只触发代理层的 fire-and-forget 下载，不阻塞调用方，不初始化控制器。
+  /// 仅对非 HLS 的 http/https 视频有效；HLS 和本地文件跳过。
+  void _prefetchVideosAround(int centerIndex) {
+    if (widget.items.isEmpty) return;
+    // 只预热向后 2 条，向前 1 条，避免用户反向滑动时浪费带宽
+    const int ahead = 2;
+    const int behind = 1;
+    final proxy = VideoCacheProxyServer.instance;
+    if (proxy.port == 0) return; // 代理未启动
+    int wrap(int i) =>
+        (i % widget.items.length + widget.items.length) % widget.items.length;
+    for (int i = -behind; i <= ahead; i++) {
+      if (i == 0) continue; // 当前页由 controller 自己拉取
+      final idx = wrap(centerIndex + i);
+      final url = widget.items[idx].videoUrl;
+      final lower = url.toLowerCase();
+      if (lower.startsWith('file://')) continue;
+      if (lower.contains('.m3u8')) continue;
+      if (!lower.startsWith('http://') && !lower.startsWith('https://')) continue;
+      proxy.prefetch(url);
+    }
   }
 
   /// 预加载当前索引附近的封面图片
@@ -1521,6 +1727,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     for (int i = -n; i <= n; i++) {
       final idx = wrap(centerIndex + i);
       final item = widget.items[idx];
+      if (item.coverUrl.isEmpty) continue;
       if (_preloadedCovers.contains(item.coverUrl)) continue;
       final provider = ResizeImage(
         ExtendedNetworkImageProvider(item.coverUrl, cache: true),

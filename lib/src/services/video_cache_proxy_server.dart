@@ -69,18 +69,54 @@ class VideoCacheProxyServer {
   String proxiedUrl(String originalUrl) =>
       'http://127.0.0.1:$port/proxy?url=${Uri.encodeComponent(originalUrl)}';
 
+  /// 后台静默预热：提前开始下载，不阻塞调用方，不关联任何 player response。
+  ///
+  /// 已缓存或已在下载中的 URL 直接跳过。HLS 和本地文件不应传入此方法。
+  void prefetch(String url) {
+    if (_server == null) return;          // 代理还未启动，跳过
+    if (_cached.containsKey(url)) return; // 已完整缓存
+    if (_active.containsKey(url)) return; // 已在下载中
+    final file = _cacheFileFor(url);
+    logging('[proxy] prefetch start ${_shortUrl(url)}');
+    final download = _ActiveDownload(url, file);
+    _active[url] = download;
+    // fire-and-forget：传入一个 null-like sentinel response 不现实，
+    // 改用 _PrefetchSink 作为虚拟响应接收者，只写盘不回传。
+    download.startPrefetch().then((_) {
+      _active.remove(url);
+      if (download.isDone && file.existsSync() && file.lengthSync() > 0) {
+        _cached[url] = file;
+        logging('[proxy] prefetch cached ${_shortUrl(url)} (${file.lengthSync()} bytes)');
+        _evictIfNeeded();
+      } else {
+        if (file.existsSync()) {
+          try { file.deleteSync(); } catch (_) {}
+        }
+        logging('[proxy] prefetch incomplete ${_shortUrl(url)}');
+      }
+    }).catchError((Object e) {
+      _active.remove(url);
+      if (file.existsSync()) {
+        try { file.deleteSync(); } catch (_) {}
+      }
+      logging('[proxy] prefetch error ${_shortUrl(url)}: $e');
+    });
+  }
+
   // MARK: - Request handler
 
   Future<void> _onRequest(HttpRequest req) async {
     try {
       if (req.uri.path != '/proxy') {
         req.response.statusCode = HttpStatus.notFound;
-        return req.response.close();
+        await req.response.close();
+        return;
       }
       final original = req.uri.queryParameters['url'];
       if (original == null || original.isEmpty) {
         req.response.statusCode = HttpStatus.badRequest;
-        return req.response.close();
+        await req.response.close();
+        return;
       }
       final rangeHeader = req.headers.value('range');
       final range = _parseRange(rangeHeader);
@@ -286,6 +322,51 @@ class _ActiveDownload {
       _failWaiter(waiter);
     }
     return completer.future;
+  }
+
+  /// 纯后台预热下载：不关联任何 player response，只写盘。
+  Future<void> startPrefetch() async {
+    final client = HttpClient();
+    client.connectionTimeout = const Duration(seconds: 15);
+    client.idleTimeout = const Duration(seconds: 30);
+    try {
+      logging('[proxy] → prefetch GET ${_shortUrl(url)}');
+      final request = await client.getUrl(Uri.parse(url));
+      final response = await request.close();
+      logging('[proxy] ← prefetch ${response.statusCode} ${_shortUrl(url)}');
+      if (response.statusCode != HttpStatus.ok &&
+          response.statusCode != HttpStatus.partialContent) {
+        _failed = true;
+        if (!_downloadCompleter.isCompleted) _downloadCompleter.complete();
+        return;
+      }
+      _contentLength = response.contentLength > 0
+          ? response.contentLength
+          : int.tryParse(
+                  response.headers.value(HttpHeaders.contentLengthHeader) ?? '') ??
+              0;
+      final sink = file.openWrite(mode: FileMode.write);
+      try {
+        await for (final chunk in response) {
+          sink.add(chunk);
+          _writtenBytes += chunk.length;
+        }
+        await sink.flush();
+        _done = true;
+        logging('[proxy] prefetch DONE ${_shortUrl(url)} $_writtenBytes/$_contentLength B');
+      } catch (e) {
+        _failed = true;
+        logging('[proxy] prefetch chunk err ${_shortUrl(url)}: $e');
+      } finally {
+        await sink.close();
+      }
+    } catch (e) {
+      _failed = true;
+      logging('[proxy] prefetch error ${_shortUrl(url)}: $e');
+    } finally {
+      client.close();
+      if (!_downloadCompleter.isCompleted) _downloadCompleter.complete();
+    }
   }
 
   /// 启动 HTTP 下载，同时服务第一个请求。
