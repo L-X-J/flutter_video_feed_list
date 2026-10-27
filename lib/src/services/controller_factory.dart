@@ -1,183 +1,127 @@
-import 'dart:async';
+// 控制器工厂：创建并初始化 VideoPlayerController。
+//
+// 网络视频统一通过本地缓存代理服务器（VideoCacheProxyServer）中转：
+// - 代理层负责单流边播边缓存，player 始终拿到 127.0.0.1 地址
+// - 本地文件直接用 file 控制器，不经过代理
+// - HLS（.m3u8）跳过代理，直接使用原始 URL（分片流不适合整文件缓存）
 import 'dart:io' show File;
 
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter_video_feed_list/src/utils/logging.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/video_item.dart';
+import 'video_cache_proxy_server.dart';
 
-/// 控制器工厂：负责按“边播边缓存”的策略创建并初始化 VideoPlayerController
+/// 控制器工厂：创建并初始化 [VideoPlayerController]。
 ///
-/// - 命中缓存时：使用本地文件播放以获得更快启动
-/// - 未命中缓存时：立即使用网络播放，并在后台启动缓存下载（打印速率与进度）
-/// - HLS/流媒体（`.m3u8`）不执行整文件缓存，仅网络播放
-/// - 遇到初始化失败时支持切换到 `platformView` 兜底
+/// 网络视频走本地代理实现边播边缓存；本地文件和 HLS 直通。
 class VideoControllerFactory {
   VideoControllerFactory();
 
-  final Map<String, StreamSubscription<FileResponse>> _subs = {};
-  final Map<String, int> _lastBytes = {};
-  final Map<String, DateTime> _lastAt = {};
-
-  /// 创建并初始化控制器
+  /// 创建并初始化控制器。
   ///
-  /// 参数:
   /// - [item] 视频条目，需包含 `videoUrl` 与唯一 `key`
   /// - [viewType] 视图类型（TextureView/PlatformView）
   /// - [loop] 是否循环播放
   /// - [volume] 初始音量
   ///
-  /// 返回:
-  /// - 成功时返回已初始化的 `VideoPlayerController`；失败返回 `null`
+  /// 返回已初始化的 [VideoPlayerController]；失败时返回 `null`。
   Future<VideoPlayerController?> createAndInit(
     IVideoItem item, {
     required VideoViewType viewType,
     required bool loop,
     required double volume,
+    VideoPlayerOptions? videoPlayerOptions,
   }) async {
-    final cacheManager = DefaultCacheManager();
-    final isHls = item.videoUrl.toLowerCase().contains('.m3u8');
-    final cached = await cacheManager.getFileFromCache(item.videoUrl);
-    if (cached?.file != null) {
-      final File file = cached!.file;
-      final controller = VideoPlayerController.file(
-        file,
-        viewType: viewType,
-      );
-      await controller.initialize();
-      await controller.setLooping(loop);
-      try {
-        await controller.setVolume(volume);
-      } catch (_) {}
-      final s = controller.value.size;
-      // ignore: avoid_print
-      logging(
-          'init(cache) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
+    final originalUri = Uri.parse(item.videoUrl);
 
-      return controller;
+    final VideoPlayerController controller;
+    if (originalUri.scheme == 'file') {
+      // 本地文件直接用 file 控制器，不经过代理。
+      logging('[factory] file ${item.key}');
+      controller = VideoPlayerController.file(
+        File.fromUri(originalUri),
+        viewType: viewType,
+        videoPlayerOptions: videoPlayerOptions,
+      );
+    } else {
+      // 网络视频：非 HLS 走本地代理实现边播边缓存；HLS 直接使用原始 URL。
+      final useProxy = _shouldUseProxy(item.videoUrl);
+      final playUrl = useProxy ? await _proxyUrl(item.videoUrl) : item.videoUrl;
+      logging('[factory] ${useProxy ? "proxy" : "direct"} ${item.key} → ${_shortUrl(playUrl)}');
+      controller = VideoPlayerController.networkUrl(
+        Uri.parse(playUrl),
+        viewType: viewType,
+        videoPlayerOptions: videoPlayerOptions,
+      );
     }
 
     try {
-      // 立即网络播放
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(item.videoUrl),
-        viewType: viewType,
-      );
-      await controller.initialize();
+      logging('[factory] init start ${item.key}');
+      await controller.initialize().timeout(const Duration(seconds: 30));
       await controller.setLooping(loop);
       try {
         await controller.setVolume(volume);
       } catch (_) {}
       final s = controller.value.size;
-      // ignore: avoid_print
-      logging(
-          'init(network-stream) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio} type=$viewType');
-
-      // 后台缓存下载（非 HLS）
-      if (!isHls && !_subs.containsKey(item.key)) {
-        final stream =
-            cacheManager.getFileStream(item.videoUrl, withProgress: true);
-        final sub = stream.listen(
-            (resp) {
-              if (resp is DownloadProgress) {
-                final now = DateTime.now();
-                final lastBytes = _lastBytes[item.key];
-                final lastAt = _lastAt[item.key];
-                if (lastBytes != null && lastAt != null) {
-                  final deltaBytes = resp.downloaded - lastBytes;
-                  final dtMs = now.difference(lastAt).inMilliseconds;
-                  if (dtMs > 0) {
-                    final speed = deltaBytes / (dtMs / 1000.0);
-                    final total = resp.totalSize ?? 0;
-                    final percent = total > 0
-                        ? ((resp.downloaded * 100.0) / total).toStringAsFixed(1)
-                        : '?.?';
-                    // ignore: avoid_print
-                    logging(
-                        'cache ${item.key} $percent% ${_fmtBytes(speed)}/s');
-                  }
-                }
-                _lastBytes[item.key] = resp.downloaded;
-                _lastAt[item.key] = now;
-              } else if (resp is FileInfo) {
-                try {
-                  final sz = resp.file.lengthSync();
-                  // ignore: avoid_print
-                  logging('cache ${item.key} done ${_fmtBytes(sz)}');
-                } catch (_) {
-                  // ignore: avoid_print
-                  logging('cache ${item.key} done');
-                }
-              }
-            },
-            onError: (_) {},
-            onDone: () {
-              _cleanup(item.key);
-            },
-            cancelOnError: true);
-        _subs[item.key] = sub;
-      }
+      logging('[factory] init ok ${item.key} ${s.width}x${s.height} type=$viewType');
       return controller;
     } catch (e) {
-      // 尝试切换到 platformView 兜底
-      if (viewType != VideoViewType.platformView) {
+      logging('[factory] init FAIL ${item.key}: $e');
+      await controller.dispose();
+      // 若 texture 模式失败，降级到 platformView 重试一次（使用原始 URL 规避代理异常）。
+      if (viewType != VideoViewType.platformView &&
+          originalUri.scheme != 'file') {
         try {
-          final controller = VideoPlayerController.networkUrl(
-            Uri.parse(item.videoUrl),
+          logging('[factory] fallback platformView ${item.key}');
+          final fallback = VideoPlayerController.networkUrl(
+            originalUri,
             viewType: VideoViewType.platformView,
+            videoPlayerOptions: videoPlayerOptions,
           );
-          await controller.initialize();
-          await controller.setLooping(loop);
+          await fallback.initialize().timeout(const Duration(seconds: 30));
+          await fallback.setLooping(loop);
           try {
-            await controller.setVolume(volume);
+            await fallback.setVolume(volume);
           } catch (_) {}
-          final s = controller.value.size;
-          // ignore: avoid_print
-          logging(
-              'init(platformView) ${item.key} size=${s.width}x${s.height} ratio=${controller.value.aspectRatio}');
-
-          return controller;
-        } catch (e3) {
-          // ignore: avoid_print
-          logging('Controller init failed all fallbacks: $e3');
+          logging('[factory] fallback ok ${item.key}');
+          return fallback;
+        } catch (e2) {
+          logging('[factory] fallback FAIL ${item.key}: $e2');
           return null;
         }
       }
-      // ignore: avoid_print
-      logging('Controller init failed in network stream: $e');
       return null;
     }
   }
 
-  /// 释放并清理内部资源（取消下载订阅）
-  Future<void> dispose() async {
-    final subs = List<StreamSubscription<FileResponse>>.from(_subs.values);
-    for (final s in subs) {
-      try {
-        await s.cancel();
-      } catch (_) {}
+  /// 截短 URL 用于日志显示。
+  static String _shortUrl(String url) {
+    try {
+      final path = Uri.parse(url).pathSegments.last;
+      return path.length > 28 ? '…${path.substring(path.length - 28)}' : path;
+    } catch (_) {
+      return url.length > 36 ? '…${url.substring(url.length - 36)}' : url;
     }
-    _subs.clear();
-    _lastBytes.clear();
-    _lastAt.clear();
   }
 
-  void _cleanup(String key) {
-    _subs.remove(key)?.cancel();
-    _lastBytes.remove(key);
-    _lastAt.remove(key);
+  /// 是否对该 URL 启用本地代理缓存。
+  ///
+  /// HLS 流（.m3u8）不做整文件缓存；本地文件不经过代理。
+  static bool _shouldUseProxy(String url) {
+    final lower = url.toLowerCase();
+    if (lower.startsWith('file://')) return false;
+    if (lower.contains('.m3u8')) return false;
+    return lower.startsWith('http://') || lower.startsWith('https://');
   }
 
-  String _fmtBytes(num b) {
-    final units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    var v = b.toDouble();
-    var i = 0;
-    while (v >= 1024.0 && i < units.length - 1) {
-      v /= 1024.0;
-      i++;
-    }
-    final fixed = v < 10 ? 2 : 1;
-    return '${v.toStringAsFixed(fixed)} ${units[i]}';
+  /// 确保代理服务器已启动，返回代理 URL。
+  static Future<String> _proxyUrl(String originalUrl) async {
+    final proxy = VideoCacheProxyServer.instance;
+    await proxy.ensureStarted();
+    return proxy.proxiedUrl(originalUrl);
   }
+
+  /// 无内部资源需要释放；保留此方法维持接口兼容。
+  Future<void> dispose() async {}
 }

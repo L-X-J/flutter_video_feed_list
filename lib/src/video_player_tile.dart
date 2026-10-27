@@ -26,6 +26,7 @@ class VideoPlayerTile extends StatefulWidget {
     this.videoDisplayMode = VideoDisplayMode.cover,
     required this.viewportSize,
     this.bizWidgets,
+    this.mediaOverlayBuilder,
     this.groupId,
     this.isCurrent = false,
     this.onManualPause,
@@ -68,6 +69,11 @@ class VideoPlayerTile extends StatefulWidget {
 
   /// 业务叠层组件列表（显示头像/点赞/描述等），覆盖在视频之上
   final List<Widget>? bizWidgets;
+
+  /// 按实际可见画面的条目内坐标构建叠层，包含留黑边和自适应底部业务区。
+  /// 返回值放入当前条目的 Stack，可直接返回 Positioned，随翻页与画面同步移动。
+  final Widget? Function(BuildContext context, Rect mediaBounds)?
+      mediaOverlayBuilder;
   final String? groupId;
   final bool isCurrent;
 
@@ -299,6 +305,10 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
     if (_isBuffering != shouldShowBuffering ||
         _isPlaying != isPlaying ||
         _isInitialized != isInitialized) {
+      // 诊断日志：只在状态真正变化时打印，避免每帧 position 更新都刷屏。
+      logging('[tile] ${widget.videoId.split(':').first} '
+          'isInit=$isInitialized isPlay=$isPlaying isBuf=$isBuffering '
+          '→ state_buf=$shouldShowBuffering state_play=$isPlaying state_init=$isInitialized');
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           setState(() {
@@ -379,6 +389,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         hasError = true;
       }
     }
+    // 封面只看初始化状态：controller 就绪即隐藏封面。
+    // automaticallyWaitsToMinimizeStalling=false 后 AVPlayer 初始化完成即直接播放，
+    // 不再有"初始化完成但还在等缓冲"的中间态，因此不需要 _isBuffering 兜底。
     final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
     final Size coverBaseSize = _resolveCoverReferenceSize(controller);
@@ -431,6 +444,16 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
       });
     }
 
+    final mediaStage =
+        activeMediaInsets.deflateRect(Offset.zero & widget.viewportSize);
+    final fittedSize = applyBoxFit(
+      showCover ? coverLayoutDecision.coverFit : videoLayoutDecision.videoFit,
+      showCover ? coverBaseSize : videoBaseSize,
+      mediaStage.size,
+    ).destination;
+    final mediaBounds =
+        activeLayoutDecision.alignment.inscribe(fittedSize, mediaStage);
+
     return Stack(
       children: [
         Positioned.fill(
@@ -449,15 +472,17 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
                 child: SizedBox(
                   width: coverBaseSize.width,
                   height: coverBaseSize.height,
-                  child: ExtendedImage.network(
-                    widget.coverUrl,
-                    fit: BoxFit.cover,
-                    filterQuality: FilterQuality.low,
-                    cache: true,
-                    clearMemoryCacheWhenDispose: true,
-                    // cacheWidth: (cacheWidth / 2).round(),
-                    // cacheHeight: (cacheHeight / 2).round(),
-                  ),
+                  child: widget.coverUrl.isEmpty
+                      ? const ColoredBox(color: Colors.black)
+                      : ExtendedImage.network(
+                          widget.coverUrl,
+                          fit: BoxFit.cover,
+                          filterQuality: FilterQuality.low,
+                          cache: true,
+                          clearMemoryCacheWhenDispose: true,
+                          // cacheWidth: (cacheWidth / 2).round(),
+                          // cacheHeight: (cacheHeight / 2).round(),
+                        ),
                 ),
               );
             }),
@@ -555,6 +580,9 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
               child: Stack(children: widget.bizWidgets!),
             ),
           ),
+        if (widget.mediaOverlayBuilder != null)
+          widget.mediaOverlayBuilder!(context, mediaBounds) ??
+              const SizedBox.shrink(),
       ],
     );
   }
