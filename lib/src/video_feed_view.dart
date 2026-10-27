@@ -1703,7 +1703,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     int wrap(int i) =>
         (i % widget.items.length + widget.items.length) % widget.items.length;
     for (int i = -behind; i <= ahead; i++) {
-      if (i == 0) continue; // 当前页由 controller 自己拉取
+      // i==0 也预热：controller.initialize() 连上代理时走 ATTACH 分支，不重新发 HTTP 请求
       final idx = wrap(centerIndex + i);
       final url = widget.items[idx].videoUrl;
       final lower = url.toLowerCase();
