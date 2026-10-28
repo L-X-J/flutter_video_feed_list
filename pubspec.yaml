@@ -21,7 +21,11 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^3.0.0
 
+# 仅对本包独立开发/example 生效；宿主 App 需在自己的 pubspec 中声明同样的 overrides，
+# 见 third_party/README.md。
 dependency_overrides:
+  video_player:
+    path: third_party/video_player
   video_player_android:
     path: third_party/video_player_android
   video_player_avfoundation:
