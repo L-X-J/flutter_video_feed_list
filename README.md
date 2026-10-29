@@ -142,3 +142,11 @@ VideoFeedView(
 - 拆分：models/enums/services/widgets/utils 分层与中文注释完善
 - 优化：滑到即播、快滑仅当前、并发防重、容量预驱逐与过期 controller 丢弃
 - 修复：快速滑动时滚动更新不再直接触发播放器创建/播放，避免平台消息和 MediaCodec 创建释放堆积
+
+## 首播与下载调度
+
+- 当前条目初始化后立即进入播放流程，封面加载与邻居初始化不进入首播等待链。
+- MP4 当前文件完整缓存后才初始化窗口内邻居；取消独立的前后多条整文件预热，避免抢占当前播放带宽。`maxCacheControllers` 同时限制邻居控制器的范围，非循环列表不预加载首尾之外的条目。
+- `VideoCacheProxyServer.prefetch` 和播放器共用一个下载任务；下载中的 Range 从临时文件流式读取，结束且长度校验通过后才原子改名为完整缓存。离开窗口取消旧任务，完成缓存可跨代理重启复用。
+- `[factory] init ok ...ms`、`[proxy] headers ...ms`、`firstByte ...ms` 和 `DONE ...ms` 用于区分初始化、上游首字节与完整下载耗时；初始化完成不代表首帧已经显示。
+- iOS 保留 2 秒前向缓冲偏好并启用 AVPlayer 自动等待，降低网络波动时反复耗尽缓冲的概率。宿主需将三个 `video_player` overrides 同步指向本仓库的 `third_party`，原生变更需完整重启构建后验收。

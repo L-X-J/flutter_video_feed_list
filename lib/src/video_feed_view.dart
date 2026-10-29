@@ -1,3 +1,4 @@
+// 视频信息流与控制器生命周期编排：当前播放优先，邻居缓存异步预热。
 import 'dart:async';
 import 'dart:io' show Platform;
 
@@ -5,7 +6,6 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/widgets.dart';
 import 'package:preload_page_view/preload_page_view.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
@@ -40,8 +40,12 @@ class VideoFeedViewController {
   /// 跳转到数据源的指定索引，不重新创建信息流。
   Future<void> jumpToIndex(int index) async {
     final s = _state;
-    if (s == null || !s.mounted || index < 0 || index >= s.widget.items.length)
+    if (s == null ||
+        !s.mounted ||
+        index < 0 ||
+        index >= s.widget.items.length) {
       return;
+    }
     final physical =
         s.widget.infiniteScroll ? s.widget.items.length * 1000 + index : index;
     s._pageController.jumpToPage(physical);
@@ -104,8 +108,13 @@ class VideoFeedViewController {
   /// 当前已初始化的活动播放器；不返回预加载项，不转移销毁所有权。
   /// 用于媒体帧/音频旁路分析，不允许调用方替换或销毁控制器。
   VideoPlayerController? get currentPlayer {
-    final state=_state;
-    if (state==null || !state.mounted || state.widget.items.isEmpty || state._currentIndex>=state.widget.items.length) return null;
+    final state = _state;
+    if (state == null ||
+        !state.mounted ||
+        state.widget.items.isEmpty ||
+        state._currentIndex >= state.widget.items.length) {
+      return null;
+    }
     return state._controllerCache[state.widget.items[state._currentIndex].key];
   }
 
@@ -306,6 +315,7 @@ class VideoPlaybackProgressEvent {
   final Duration position;
   final Duration duration;
   final bool isPlaying;
+
   /// 当前已缓冲到的最远位置；未知时为 Duration.zero。
   final Duration buffered;
 }
@@ -586,6 +596,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       items: widget.items,
       currentIndex: _normalizeIndex(targetIndex),
       maxCacheControllers: _resolvedMaxControllers,
+      infiniteScroll: widget.infiniteScroll,
     );
   }
 
@@ -752,18 +763,14 @@ class _VideoFeedViewState extends State<VideoFeedView>
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final generation = _stableApplyGeneration;
-      await _preloadCoversAround(_currentIndex);
-      _prefetchVideosAround(_currentIndex);
-      await _manageControllerWindow(_currentIndex, generation: generation);
-      // 初始化并根据 autoplay 决定是否播放，同时触发重建
-      await _initAndPlayVideo(_currentIndex, generation: generation);
-      if (_canStartPlayback) {
-        await VideoFeedSessionManager.instance.pauseOthers(widget.feedId);
-      }
+      // 封面不进入首播等待链；邻居由当前文件下载完成后的独立任务初始化。
+      unawaited(_preloadCoversAround(_currentIndex));
+      await _applyStablePage(_currentIndex, generation);
+      if (!mounted || _released) return;
       VideoFeedSessionManager.instance.setDelegates(
         widget.feedId,
         clearOthersKeepCurrent: _disposeOthersKeepCurrent,
-        restoreWindow: () => _manageControllerWindow(_currentIndex),
+        restoreWindow: _resumeCurrentIfAllowed,
       );
     });
     _volumeSub = VolumeManager.instance.stream.listen((vol) async {
@@ -806,6 +813,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (widget.controller?._state == this) widget.controller?._state = null;
     WidgetsBinding.instance.removeObserver(this);
     _invalidateStablePageApply();
+    VideoCacheProxyServer.instance.releaseDownloads(this);
     unawaited(_flushActivePlaybackSegment(VideoPlaybackStopReason.disposed));
     VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
@@ -830,6 +838,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       WidgetsBinding.instance.removeObserver(this);
     } catch (_) {}
     _invalidateStablePageApply();
+    VideoCacheProxyServer.instance.releaseDownloads(this);
     await _flushActivePlaybackSegment(VideoPlaybackStopReason.released);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     VideoFeedSessionManager.instance.removeDelegates(widget.feedId);
@@ -842,8 +851,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
   void didUpdateWidget(VideoFeedView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
-      if (oldWidget.controller?._state == this)
+      if (oldWidget.controller?._state == this) {
         oldWidget.controller?._state = null;
+      }
       widget.controller?._bind(this);
     }
     if (oldWidget.playbackAllowed != widget.playbackAllowed) {
@@ -1102,6 +1112,11 @@ class _VideoFeedViewState extends State<VideoFeedView>
         widget.items.isNotEmpty) {
       _manuallyPausedKey = widget.items[_currentIndex].key;
     }
+    _warmupGeneration++;
+    if (!_released && widget.items.isNotEmpty) {
+      VideoCacheProxyServer.instance
+          .retainDownloads(this, [widget.items[_currentIndex].videoUrl]);
+    }
     await _flushActivePlaybackSegment(reason);
     await VideoFeedSessionManager.instance.pauseGroup(widget.feedId);
     if (mounted) {
@@ -1119,8 +1134,13 @@ class _VideoFeedViewState extends State<VideoFeedView>
         _currentIndex >= widget.items.length) {
       return;
     }
-    final item = widget.items[_currentIndex];
-    await _getOrCreateController(item);
+    final index = _currentIndex;
+    final generation = _stableApplyGeneration;
+    final item = widget.items[index];
+    VideoCacheProxyServer.instance.retainDownloads(this, [item.videoUrl]);
+    await _getOrCreateController(item,
+        generation: generation, targetIndex: index);
+    if (!_isStableApplyActive(generation, index)) return;
     final controller = _controllerCache[item.key];
     VideoFeedSessionManager.instance.setCurrent(widget.feedId, controller);
     if (!_canStartPlayback) {
@@ -1128,6 +1148,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
       return;
     }
     await _playController(item.key);
+    _scheduleNeighborWarmup(index, generation);
     if (mounted) {
       setState(() {});
     }
@@ -1152,6 +1173,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final c = _controllerCache[item.key];
     VideoFeedSessionManager.instance.setCurrent(widget.feedId, c);
     if (mounted) setState(() {});
+    _scheduleNeighborWarmup(normalized, generation ?? _stableApplyGeneration);
   }
 
   void _touchController(String key) {
@@ -1168,51 +1190,62 @@ class _VideoFeedViewState extends State<VideoFeedView>
     IVideoItem item, {
     int? generation,
     int? targetIndex,
+    bool Function()? shouldContinue,
   }) async {
     final key = item.key;
-    if (_failedKeys.contains(key)) return null;
+    if (_failedKeys.contains(key) || shouldContinue?.call() == false) {
+      return null;
+    }
     if (!_isStableApplyActive(generation, targetIndex) ||
         !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
       return null;
     }
-    if (_controllerCache.containsKey(key)) {
-      _touchController(key);
-      return _controllerCache[key];
+    final cached = _controllerCache[key];
+    if (cached != null) {
+      if (!cached.value.hasError) {
+        _touchController(key);
+        return cached;
+      }
+      // 旧窗口主动取消的预加载播放器可以在成为当前页后重新初始化。
+      await _removeController(key);
+      if (!_isStableApplyActive(generation, targetIndex) ||
+          shouldContinue?.call() == false) {
+        return null;
+      }
     }
 
-    if (_creationInFlight.containsKey(key)) {
-      final controller = await _creationInFlight[key];
-      if (!_isStableApplyActive(generation, targetIndex) ||
+    final pending = _creationInFlight[key];
+    if (pending != null) {
+      await pending;
+      if (shouldContinue?.call() == false ||
+          !_isStableApplyActive(generation, targetIndex) ||
           !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
         return null;
       }
-      return controller;
+      if (identical(_creationInFlight[key], pending)) {
+        _creationInFlight.remove(key);
+      }
+      // 切到尚在预加载的条目时，旧代次可能已经释放结果；用新代次重新取得播放器。
+      return _getOrCreateController(item,
+          generation: generation,
+          targetIndex: targetIndex,
+          shouldContinue: shouldContinue);
     }
 
+    // 必须在第一个异步间隙前登记 Future，防止回收旧控制器时重复创建同一条目。
+    final future = _createController(
+      item,
+      generation: generation,
+      targetIndex: targetIndex,
+      shouldContinue: shouldContinue,
+    );
+    _creationInFlight[key] = future;
     try {
-      final int maxSize = _resolvedMaxControllers;
-      if (_controllerCache.length >= maxSize) {
-        final protectedKeys = _controllerKeysForTargetWindow(
-          targetIndex ?? _currentIndex,
-        )..remove(key);
-        await _evictOne(
-          policy: widget.evictionPolicy,
-          protectedKeys: protectedKeys,
-        );
+      return await future;
+    } finally {
+      if (identical(_creationInFlight[key], future)) {
+        _creationInFlight.remove(key);
       }
-
-      final future = _createController(
-        item,
-        generation: generation,
-        targetIndex: targetIndex,
-      );
-      _creationInFlight[key] = future;
-      final controller = await future;
-      _creationInFlight.remove(key);
-      return controller;
-    } catch (e) {
-      _creationInFlight.remove(key);
-      rethrow;
     }
   }
 
@@ -1224,6 +1257,7 @@ class _VideoFeedViewState extends State<VideoFeedView>
     IVideoItem item, {
     int? generation,
     int? targetIndex,
+    bool Function()? shouldContinue,
   }) async {
     final key = item.key;
 
@@ -1231,7 +1265,22 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (Platform.isAndroid && !_deviceCheckDone) {
       await _checkDevice();
     }
-    if (!_isStableApplyActive(generation, targetIndex) ||
+    if (shouldContinue?.call() == false ||
+        !_isStableApplyActive(generation, targetIndex) ||
+        !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
+      return null;
+    }
+
+    final maxSize = _resolvedMaxControllers;
+    if (_controllerCache.length >= maxSize) {
+      final protectedKeys = _controllerKeysForTargetWindow(
+        targetIndex ?? _currentIndex,
+      )..remove(key);
+      await _evictOne(
+          policy: widget.evictionPolicy, protectedKeys: protectedKeys);
+    }
+    if (shouldContinue?.call() == false ||
+        !_isStableApplyActive(generation, targetIndex) ||
         !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
       return null;
     }
@@ -1246,16 +1295,23 @@ class _VideoFeedViewState extends State<VideoFeedView>
       loop: widget.loop,
       volume: VolumeManager.instance.volume,
       videoPlayerOptions: widget.videoPlayerOptions,
+      shouldContinue: () =>
+          (shouldContinue?.call() ?? true) &&
+          _isStableApplyActive(generation, targetIndex) &&
+          _shouldKeepControllerKey(key, targetIndex: targetIndex),
     );
     if (controller == null) {
-      if (_isStableApplyActive(generation, targetIndex)) {
+      if (shouldContinue?.call() != false &&
+          _isStableApplyActive(generation, targetIndex) &&
+          _isCurrentKey(key)) {
         _failedKeys.add(key);
         widget.onPlaybackError?.call(item);
         if (mounted) setState(() {});
       }
       return null;
     }
-    if (!_isStableApplyActive(generation, targetIndex) ||
+    if (shouldContinue?.call() == false ||
+        !_isStableApplyActive(generation, targetIndex) ||
         !_shouldKeepControllerKey(key, targetIndex: targetIndex)) {
       try {
         await controller.dispose();
@@ -1265,7 +1321,10 @@ class _VideoFeedViewState extends State<VideoFeedView>
     }
     _controllerCache[key] = controller;
     void progressListener() {
-      if (controller.value.hasError && _failedKeys.add(key)) {
+      if (!_released &&
+          _isCurrentKey(key) &&
+          controller.value.hasError &&
+          _failedKeys.add(key)) {
         widget.onPlaybackError?.call(item);
       }
       _notifyPlaybackProgress(key, controller);
@@ -1427,18 +1486,26 @@ class _VideoFeedViewState extends State<VideoFeedView>
   Future<void> _manageControllerWindow(
     int currentIndex, {
     int? generation,
+    bool initializeNeighbors = false,
+    bool Function()? shouldContinue,
   }) async {
     final normalized = _normalizeIndex(currentIndex);
     await manageControllerWindow(
       items: widget.items,
       currentIndex: normalized,
       maxCacheControllers: _resolvedMaxControllers,
+      infiniteScroll: widget.infiniteScroll,
+      initializeNeighbors: initializeNeighbors,
+      shouldContinue: () =>
+          _isStableApplyActive(generation, normalized) &&
+          (shouldContinue?.call() ?? true),
       controllerCache: _controllerCache,
       removeController: _removeController,
       getOrCreateController: (item) => _getOrCreateController(
         item,
         generation: generation,
         targetIndex: normalized,
+        shouldContinue: shouldContinue,
       ),
     );
   }
@@ -1470,8 +1537,9 @@ class _VideoFeedViewState extends State<VideoFeedView>
         isFastScroll: isFastScroll,
       );
 
-      await _preloadCoversAround(normalized);
-      _prefetchVideosAround(normalized);
+      VideoCacheProxyServer.instance
+          .retainDownloads(this, [currentItem.videoUrl]);
+      unawaited(_preloadCoversAround(normalized));
       if (!_isLatestPageChange(newIndex, normalizedIndex: normalized)) {
         return;
       }
@@ -1525,6 +1593,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
     if (!_isStableApplyActive(generation, normalized)) {
       return;
     }
+    final currentUrl = widget.items[normalized].videoUrl;
+    VideoCacheProxyServer.instance.retainDownloads(this, [currentUrl]);
     await _manageControllerWindow(normalized, generation: generation);
     if (!_isStableApplyActive(generation, normalized)) {
       return;
@@ -1660,6 +1730,8 @@ class _VideoFeedViewState extends State<VideoFeedView>
                           index: logicalIndex,
                           reason: VideoPlaybackStateChangeReason.manualResume,
                         );
+                        _scheduleNeighborWarmup(
+                            logicalIndex, _stableApplyGeneration);
                       },
                       mediaOverlayBuilder: widget.mediaOverlayBuilder == null
                           ? null
@@ -1689,29 +1761,37 @@ class _VideoFeedViewState extends State<VideoFeedView>
     );
   }
 
-  /// 后台预热当前索引附近视频的下载缓存。
-  ///
-  /// 只触发代理层的 fire-and-forget 下载，不阻塞调用方，不初始化控制器。
-  /// 仅对非 HLS 的 http/https 视频有效；HLS 和本地文件跳过。
-  void _prefetchVideosAround(int centerIndex) {
-    if (widget.items.isEmpty) return;
-    // 只预热向后 2 条，向前 1 条，避免用户反向滑动时浪费带宽
-    const int ahead = 2;
-    const int behind = 1;
+  int _warmupGeneration = 0;
+
+  /// 等当前文件完整缓存后才初始化邻居；等待不占用稳态切页队列。
+  void _scheduleNeighborWarmup(int index, int generation) {
+    final warmup = ++_warmupGeneration;
+    unawaited(_warmNeighbors(index, generation, warmup).catchError((Object e) {
+      logging('neighbor warmup ended: $e');
+    }));
+  }
+
+  Future<void> _warmNeighbors(int index, int generation, int warmup) async {
+    bool valid() =>
+        warmup == _warmupGeneration &&
+        _isStableApplyActive(generation, index) &&
+        _canStartPlayback;
+    if (!valid() || _resolvedMaxControllers <= 1) return;
+    final item = widget.items[index];
+    final player = _controllerCache[item.key];
+    if (player == null || player.value.hasError) return;
     final proxy = VideoCacheProxyServer.instance;
-    if (proxy.port == 0) return; // 代理未启动
-    int wrap(int i) =>
-        (i % widget.items.length + widget.items.length) % widget.items.length;
-    for (int i = -behind; i <= ahead; i++) {
-      // i==0 也预热：controller.initialize() 连上代理时走 ATTACH 分支，不重新发 HTTP 请求
-      final idx = wrap(centerIndex + i);
-      final url = widget.items[idx].videoUrl;
-      final lower = url.toLowerCase();
-      if (lower.startsWith('file://')) continue;
-      if (lower.contains('.m3u8')) continue;
-      if (!lower.startsWith('http://') && !lower.startsWith('https://')) continue;
-      proxy.prefetch(url);
-    }
+    if (!await proxy.waitUntilCached(item.videoUrl) || !valid()) return;
+    final keys = _controllerKeysForTargetWindow(index);
+    proxy.retainDownloads(
+        this,
+        widget.items
+            .where((item) => keys.contains(item.key))
+            .map((item) => item.videoUrl));
+    await _manageControllerWindow(index,
+        generation: generation,
+        initializeNeighbors: true,
+        shouldContinue: valid);
   }
 
   /// 预加载当前索引附近的封面图片
@@ -1725,7 +1805,12 @@ class _VideoFeedViewState extends State<VideoFeedView>
     final int cacheWidth = (_viewportSize.width * _devicePixelRatio).round();
     final int cacheHeight = (_viewportSize.height * _devicePixelRatio).round();
     for (int i = -n; i <= n; i++) {
-      final idx = wrap(centerIndex + i);
+      final candidate = centerIndex + i;
+      if (!widget.infiniteScroll &&
+          (candidate < 0 || candidate >= widget.items.length)) {
+        continue;
+      }
+      final idx = wrap(candidate);
       final item = widget.items[idx];
       if (item.coverUrl.isEmpty) continue;
       if (_preloadedCovers.contains(item.coverUrl)) continue;

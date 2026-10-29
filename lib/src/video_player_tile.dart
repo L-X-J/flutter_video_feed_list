@@ -389,9 +389,8 @@ class _VideoPlayerTileState extends State<VideoPlayerTile>
         hasError = true;
       }
     }
-    // 封面只看初始化状态：controller 就绪即隐藏封面。
-    // automaticallyWaitsToMinimizeStalling=false 后 AVPlayer 初始化完成即直接播放，
-    // 不再有"初始化完成但还在等缓冲"的中间态，因此不需要 _isBuffering 兜底。
+    // 初始化后显示原生画面，缓冲提示独立展示；初始化完成不保证首帧已经送达。
+    // 播放中缓冲时保留最后画面，不让封面反复覆盖视频。
     final showCover = controller == null || !safelyInitialized || hasError;
     final coverOpacity = showCover ? 1.0 : 0.0;
     final Size coverBaseSize = _resolveCoverReferenceSize(controller);

@@ -1,51 +1,41 @@
+// 控制器窗口策略：优先下一条，先就绪当前页，再按许可初始化邻居。
 import 'package:video_player/video_player.dart';
 
 import '../models/video_item.dart';
 import '../utils/logging.dart';
 
-/// 计算当前索引附近应该保留的控制器 key 集合。
-///
-/// 该函数是窗口策略的单一计算入口，供窗口管理与异步创建后的过期校验共用，
-/// 避免快速滑动时已经离开窗口的控制器在初始化完成后重新注册进缓存。
+/// 非循环列表优先下一条且不环绕；循环列表保留既有的前邻居优先顺序。
 Set<String> controllerKeysForWindow({
   required List<IVideoItem> items,
   required int currentIndex,
   required int maxCacheControllers,
+  bool infiniteScroll = true,
 }) {
   if (items.isEmpty) return <String>{};
-
   final maxKeep = maxCacheControllers.clamp(1, items.length);
-  final keysToKeep = <String>{};
-  int wrap(int i) => (i % items.length + items.length) % items.length;
-  final centerKey = items[wrap(currentIndex)].key;
-  keysToKeep.add(centerKey);
-
-  int left = currentIndex - 1;
-  int right = currentIndex + 1;
-  while (keysToKeep.length < maxKeep && (left >= 0 || right < items.length)) {
-    if (left >= -items.length) {
-      keysToKeep.add(items[wrap(left)].key);
-      left--;
-      if (keysToKeep.length >= maxKeep) break;
-    }
-    if (right < items.length * 2) {
-      keysToKeep.add(items[wrap(right)].key);
-      right++;
-    }
+  final keys = <String>{};
+  void add(int index) {
+    if (keys.length >= maxKeep) return;
+    if (!infiniteScroll && (index < 0 || index >= items.length)) return;
+    keys.add(items[(index % items.length + items.length) % items.length].key);
   }
 
-  return keysToKeep;
+  add(currentIndex);
+  for (var distance = 1;
+      distance < items.length && keys.length < maxKeep;
+      distance++) {
+    if (infiniteScroll) {
+      add(currentIndex - distance);
+      add(currentIndex + distance);
+    } else {
+      add(currentIndex + distance);
+      add(currentIndex - distance);
+    }
+  }
+  return keys;
 }
 
-/// 窗口控制：在当前索引附近保留有限数量的控制器
-///
-/// - [items] 数据源列表
-/// - [currentIndex] 当前逻辑索引（用于计算邻居）
-/// - [maxCacheControllers] 控制器上限（含当前）
-/// - [controllerCache] 控制器缓存映射（key -> controller）
-/// - [removeController] 移除控制器的回调（含资源释放）
-/// - [getOrCreateController] 获取或创建控制器的回调
-/// - [enableLogs] 是否输出诊断日志
+/// 过期任务在每次 await 后退出，不继续释放或创建新窗口的控制器。
 Future<void> manageControllerWindow({
   required List<IVideoItem> items,
   required int currentIndex,
@@ -54,39 +44,28 @@ Future<void> manageControllerWindow({
   required Future<void> Function(String key) removeController,
   required Future<VideoPlayerController?> Function(IVideoItem item)
       getOrCreateController,
+  bool infiniteScroll = true,
+  bool initializeNeighbors = true,
+  bool Function()? shouldContinue,
 }) async {
-  if (items.isEmpty) return;
+  if (items.isEmpty || shouldContinue?.call() == false) return;
   final keysToKeep = controllerKeysForWindow(
     items: items,
     currentIndex: currentIndex,
     maxCacheControllers: maxCacheControllers,
+    infiniteScroll: infiniteScroll,
   );
-  int wrap(int i) => (i % items.length + items.length) % items.length;
-
-  // 超出保留集合的控制器全部释放
   final keysToDispose =
-      controllerCache.keys.where((id) => !keysToKeep.contains(id)).toList();
-  for (final id in keysToDispose) {
-    await removeController(id);
+      controllerCache.keys.where((key) => !keysToKeep.contains(key)).toList();
+  for (final key in keysToDispose) {
+    if (shouldContinue?.call() == false) return;
+    await removeController(key);
   }
-
-  // 先初始化当前页控制器
-  await getOrCreateController(items[wrap(currentIndex)]);
-
-  // 再初始化邻居控制器：按距离近的优先
-  final remainingIndices = <int>[];
-  for (int i = 1; i <= maxCacheControllers; i++) {
-    final li = currentIndex - i;
-    final ri = currentIndex + i;
-    if (keysToKeep.contains(items[wrap(li)].key)) {
-      remainingIndices.add(wrap(li));
-    }
-    if (keysToKeep.contains(items[wrap(ri)].key)) {
-      remainingIndices.add(wrap(ri));
-    }
+  for (final key in keysToKeep) {
+    if (shouldContinue?.call() == false) return;
+    await getOrCreateController(items.firstWhere((item) => item.key == key));
+    if (!initializeNeighbors) break;
   }
-  for (final idx in remainingIndices) {
-    await getOrCreateController(items[idx]);
-  }
-  logging('window keep=${keysToKeep.length} active=${controllerCache.length}');
+  logging(
+      'window keep=${keysToKeep.length} active=${controllerCache.length} neighbors=$initializeNeighbors');
 }

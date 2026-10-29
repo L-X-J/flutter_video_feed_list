@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | video_player | 2.14.1 | 公开只读 `nativePlayerId`，供宿主对当前活动播放器做媒体采样。 |
 | video_player_android | 2.12.2 | 短视频缓冲参数（bufferForPlayback 500ms）；PCM 旁路功率（MotionAudioProcessor）及 Surface 的 PixelCopy 采样。 |
-| video_player_avfoundation | 2.12.2 | preferredForwardBufferDuration=2s、automaticallyWaitsToMinimizeStalling=false；VideoOutput/纹理帧采样与 MTAudioProcessingTap。 |
+| video_player_avfoundation | 2.12.2 | preferredForwardBufferDuration=2s、automaticallyWaitsToMinimizeStalling=true（按网络状态自动等待）；VideoOutput/纹理帧采样与 MTAudioProcessingTap。 |
 
 来源为 Flutter packages 对应子包，每个包保留原 LICENSE 与 README。
 

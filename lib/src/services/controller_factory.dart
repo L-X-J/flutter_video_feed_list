@@ -32,6 +32,7 @@ class VideoControllerFactory {
     required bool loop,
     required double volume,
     VideoPlayerOptions? videoPlayerOptions,
+    bool Function()? shouldContinue,
   }) async {
     final originalUri = Uri.parse(item.videoUrl);
 
@@ -48,7 +49,8 @@ class VideoControllerFactory {
       // 网络视频：非 HLS 走本地代理实现边播边缓存；HLS 直接使用原始 URL。
       final useProxy = _shouldUseProxy(item.videoUrl);
       final playUrl = useProxy ? await _proxyUrl(item.videoUrl) : item.videoUrl;
-      logging('[factory] ${useProxy ? "proxy" : "direct"} ${item.key} → ${_shortUrl(playUrl)}');
+      logging(
+          '[factory] ${useProxy ? "proxy" : "direct"} ${item.key} → ${_shortUrl(playUrl)}');
       controller = VideoPlayerController.networkUrl(
         Uri.parse(playUrl),
         viewType: viewType,
@@ -56,7 +58,12 @@ class VideoControllerFactory {
       );
     }
 
+    final watch = Stopwatch()..start();
     try {
+      if (shouldContinue?.call() == false) {
+        await controller.dispose();
+        return null;
+      }
       logging('[factory] init start ${item.key}');
       await controller.initialize().timeout(const Duration(seconds: 30));
       await controller.setLooping(loop);
@@ -64,21 +71,23 @@ class VideoControllerFactory {
         await controller.setVolume(volume);
       } catch (_) {}
       final s = controller.value.size;
-      logging('[factory] init ok ${item.key} ${s.width}x${s.height} type=$viewType');
+      logging(
+          '[factory] init ok ${watch.elapsedMilliseconds}ms ${item.key} ${s.width}x${s.height} type=$viewType');
       return controller;
     } catch (e) {
       logging('[factory] init FAIL ${item.key}: $e');
       await controller.dispose();
       // 若 texture 模式失败，降级到 platformView 重试一次（使用原始 URL 规避代理异常）。
-      if (viewType != VideoViewType.platformView &&
+      if (shouldContinue?.call() != false &&
+          viewType != VideoViewType.platformView &&
           originalUri.scheme != 'file') {
+        final fallback = VideoPlayerController.networkUrl(
+          originalUri,
+          viewType: VideoViewType.platformView,
+          videoPlayerOptions: videoPlayerOptions,
+        );
         try {
           logging('[factory] fallback platformView ${item.key}');
-          final fallback = VideoPlayerController.networkUrl(
-            originalUri,
-            viewType: VideoViewType.platformView,
-            videoPlayerOptions: videoPlayerOptions,
-          );
           await fallback.initialize().timeout(const Duration(seconds: 30));
           await fallback.setLooping(loop);
           try {
@@ -88,6 +97,7 @@ class VideoControllerFactory {
           return fallback;
         } catch (e2) {
           logging('[factory] fallback FAIL ${item.key}: $e2');
+          await fallback.dispose();
           return null;
         }
       }

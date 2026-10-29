@@ -89,7 +89,7 @@ class DefaultAVFactory: WrappedAVObjectFactory {
   func playerItem(with asset: any WrappedAVAsset) -> any WrappedAVPlayerItem {
     // The default factory always vends Default* implementations, so it is safe to cast back.
     let item = AVPlayerItem(asset: (asset as! DefaultAVAsset).avAsset)
-    // 短视频场景：2 秒预缓冲足够启动播放，避免 AVPlayer 默认的 10-20 秒预缓冲延迟。
+    // 保留短视频前向缓冲偏好；实际开播时机仍由 AVPlayer 按网络供给判断。
     item.preferredForwardBufferDuration = 2.0
     return DefaultAVPlayerItem(playerItem: item)
   }
@@ -97,9 +97,8 @@ class DefaultAVFactory: WrappedAVObjectFactory {
   func player(with playerItem: any WrappedAVPlayerItem) -> AVPlayer {
     // The default factory always vends Default* implementations, so it is safe to cast back.
     let player = AVPlayer(playerItem: (playerItem as! DefaultAVPlayerItem).avPlayerItem)
-    // 不等待"足够缓冲"再开播——拿到第一帧就播，卡顿交给代理预下载兜底。
-    // 默认 true 会让 AVPlayer 内部判断"能否平滑播放"再开始，导致 4-10 秒初始缓冲。
-    player.automaticallyWaitsToMinimizeStalling = false
+    // 网络抖动时允许积累缓冲再恢复，避免强行开播后反复耗尽缓冲。
+    player.automaticallyWaitsToMinimizeStalling = true
     return player
   }
 
